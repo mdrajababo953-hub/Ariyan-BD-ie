@@ -1,7 +1,6 @@
 package com.example.vpn
 
 import org.json.JSONObject
-import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -82,9 +81,16 @@ object PacketDissector {
             protocol = protocol,
             srcIp = srcIp,
             dstIp = dstIp,
-            srcIpStr = InetAddress.getByAddress(srcIp).hostAddress ?: "0.0.0.0",
-            dstIpStr = InetAddress.getByAddress(dstIp).hostAddress ?: "0.0.0.0"
+            srcIpStr = formatIpv4(raw, 12),
+            dstIpStr = formatIpv4(raw, 16)
         )
+    }
+
+    private fun formatIpv4(buf: ByteArray, offset: Int): String {
+        return "${buf[offset].toInt() and 0xFF}." +
+            "${buf[offset + 1].toInt() and 0xFF}." +
+            "${buf[offset + 2].toInt() and 0xFF}." +
+            "${buf[offset + 3].toInt() and 0xFF}"
     }
 
     fun parseTcp(raw: ByteArray, ip: Ipv4Header): TcpSegment? {
@@ -165,8 +171,7 @@ object PacketDissector {
             offset += 10
             if (offset + rdLen > payload.size) return@repeat
             if (type == 1 && rdLen == 4) {
-                val ip = InetAddress.getByAddress(payload.copyOfRange(offset, offset + 4)).hostAddress
-                if (ip != null) ips.add(ip)
+                ips.add(formatIpv4(payload, offset))
             }
             offset += rdLen
         }

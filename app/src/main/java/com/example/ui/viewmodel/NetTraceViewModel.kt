@@ -1,6 +1,7 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
+import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.NetTraceApp
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class PacketFilterChip(val label: String) {
     HTTP_HTTPS("HTTP/S"),
@@ -78,6 +80,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     private val repo = app.captureRepository
     private val prefs = app.preferencesRepository
     private val appsRepo = app.installedAppsRepository
+    private val certManager = app.mitmCertificateManager
 
     val settings: StateFlow<AppSettings> = prefs.settingsFlow.stateIn(
         scope = viewModelScope,
@@ -122,6 +125,9 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
 
     private val _fullDecodeState = MutableStateFlow(FullDecodeUiState())
     val fullDecodeState: StateFlow<FullDecodeUiState> = _fullDecodeState.asStateFlow()
+
+    private val _caReady = MutableStateFlow(certManager.isCaReady())
+    val caReady: StateFlow<Boolean> = _caReady.asStateFlow()
 
     private val _decoderLab = MutableStateFlow(
         DecoderLabState(
@@ -195,6 +201,10 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
                 _selectedSessionId.value = seededId
             }
         }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { certManager.ensureCa() }
+            _caReady.value = certManager.isCaReady()
+        }
         refreshInstalledApps()
     }
 
@@ -249,13 +259,56 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun toggleHttpsMitm(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setHttpsMitmEnabled(enabled)
+            _snackbarMessage.value = if (vpnState.value.isRunning) {
+                "HTTPS Decrypt ${if (enabled) "enabled" else "disabled"} — stop & restart capture to apply."
+            } else {
+                "HTTPS Decrypt ${if (enabled) "enabled" else "disabled"}."
+            }
+        }
+    }
+
+    fun prepareCaInstallIntent(onReady: (Intent) -> Unit) {
+        viewModelScope.launch {
+            val intent = withContext(Dispatchers.IO) {
+                certManager.createInstallCaIntent()
+            }
+            _caReady.value = certManager.isCaReady()
+            onReady(intent)
+        }
+    }
+
+    fun saveCaCertToAryan() {
+        viewModelScope.launch {
+            val savedPath = withContext(Dispatchers.IO) {
+                runCatching { certManager.saveCaCertToAryanFolder() }
+            }
+            _caReady.value = certManager.isCaReady()
+            savedPath.fold(
+                onSuccess = { path ->
+                    _snackbarMessage.value = "CA Cert saved: $path (Settings → Security → CA certificate)"
+                },
+                onFailure = { err ->
+                    _snackbarMessage.value = "Failed to export CA cert: ${err.message}"
+                }
+            )
+        }
+    }
+
     fun startVpnCapture() {
         val target = settings.value.targetApp
         if (target.packageName.isBlank()) {
             _snackbarMessage.value = "Please select a target app first."
             return
         }
-        NetTraceVpnService.startCapture(app, target.packageName, target.appName)
+        NetTraceVpnService.startCapture(
+            context = app,
+            packageName = target.packageName,
+            appName = target.appName,
+            mitmEnabled = settings.value.httpsMitmEnabled
+        )
     }
 
     fun stopVpnCapture() {

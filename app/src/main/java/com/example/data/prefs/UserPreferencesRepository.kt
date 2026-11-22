@@ -25,7 +25,8 @@ data class AppSettings(
     val activeSessionId: Long = 0L,
     val darkTheme: Boolean = true,
     val autoDecodeOnOpen: Boolean = true,
-    val accentTheme: AppAccentTheme = AppAccentTheme.CYAN
+    val accentTheme: AppAccentTheme = AppAccentTheme.CYAN,
+    val httpsMitmEnabled: Boolean = true
 )
 
 class UserPreferencesRepository(private val context: Context) {
@@ -37,6 +38,7 @@ class UserPreferencesRepository(private val context: Context) {
         val DARK_THEME = booleanPreferencesKey("dark_theme")
         val AUTO_DECODE = booleanPreferencesKey("auto_decode")
         val ACCENT_THEME = stringPreferencesKey("accent_theme")
+        val HTTPS_MITM_ENABLED = booleanPreferencesKey("https_mitm_enabled")
     }
 
     val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -49,7 +51,8 @@ class UserPreferencesRepository(private val context: Context) {
             activeSessionId = prefs[Keys.ACTIVE_SESSION_ID] ?: 0L,
             darkTheme = prefs[Keys.DARK_THEME] ?: true,
             autoDecodeOnOpen = prefs[Keys.AUTO_DECODE] ?: true,
-            accentTheme = AppAccentTheme.fromName(prefs[Keys.ACCENT_THEME])
+            accentTheme = AppAccentTheme.fromName(prefs[Keys.ACCENT_THEME]),
+            httpsMitmEnabled = prefs[Keys.HTTPS_MITM_ENABLED] ?: true
         )
     }
 
@@ -76,6 +79,12 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun setAccentTheme(theme: AppAccentTheme) {
         context.dataStore.edit { prefs ->
             prefs[Keys.ACCENT_THEME] = theme.name
+        }
+    }
+
+    suspend fun setHttpsMitmEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.HTTPS_MITM_ENABLED] = enabled
         }
     }
 }

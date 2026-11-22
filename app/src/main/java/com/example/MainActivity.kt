@@ -119,6 +119,7 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
     val trafficRules by vm.trafficRules.collectAsStateWithLifecycle()
     val decoderLabState by vm.decoderLab.collectAsStateWithLifecycle()
     val fullDecodeState by vm.fullDecodeState.collectAsStateWithLifecycle()
+    val caReady by vm.caReady.collectAsStateWithLifecycle()
     val snackbarMsg by vm.snackbarMessage.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(MainTab.CAPTURE) }
@@ -162,6 +163,27 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
     ) {
         // Start VPN regardless; notification permission only affects status bar visibility
         launchVpnCapture()
+    }
+
+    val caInstallLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("NetTrace Proxy CA installed — HTTPS decryption ready.")
+            }
+        } else {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("Tip: Use Save CA button and install via Settings → Security → CA certificate.")
+            }
+        }
+    }
+
+    val launchCaInstall: () -> Unit = {
+        vm.prepareCaInstallIntent { intent ->
+            runCatching { caInstallLauncher.launch(intent) }
+                .onFailure { vm.saveCaCertToAryan() }
+        }
     }
 
     val startCaptureWithPermissions: () -> Unit = {
@@ -380,6 +402,11 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                     selectedPacket = selectedPacket,
                                     searchQuery = searchQuery,
                                     activeFilter = filterChip,
+                                    httpsMitmEnabled = settings.httpsMitmEnabled,
+                                    caReady = caReady,
+                                    onToggleHttpsMitm = vm::toggleHttpsMitm,
+                                    onInstallCaCert = launchCaInstall,
+                                    onSaveCaCert = vm::saveCaCertToAryan,
                                     onSearchChange = vm::setSearchQuery,
                                     onFilterChange = vm::setFilterChip,
                                     onOpenTargetPicker = { showTargetPicker = true },

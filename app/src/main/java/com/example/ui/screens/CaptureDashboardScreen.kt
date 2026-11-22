@@ -90,6 +90,11 @@ fun CaptureDashboardScreen(
     selectedPacket: CapturedPacketEntity?,
     searchQuery: String,
     activeFilter: PacketFilterChip,
+    httpsMitmEnabled: Boolean,
+    caReady: Boolean,
+    onToggleHttpsMitm: (Boolean) -> Unit,
+    onInstallCaCert: () -> Unit,
+    onSaveCaCert: () -> Unit,
     onSearchChange: (String) -> Unit,
     onFilterChange: (PacketFilterChip) -> Unit,
     onOpenTargetPicker: () -> Unit,
@@ -156,6 +161,11 @@ fun CaptureDashboardScreen(
                     selectedPacketId = selectedPacket?.id,
                     searchQuery = searchQuery,
                     activeFilter = activeFilter,
+                    httpsMitmEnabled = httpsMitmEnabled,
+                    caReady = caReady,
+                    onToggleHttpsMitm = onToggleHttpsMitm,
+                    onInstallCaCert = onInstallCaCert,
+                    onSaveCaCert = onSaveCaCert,
                     onSearchChange = onSearchChange,
                     onFilterChange = onFilterChange,
                     onOpenTargetPicker = onOpenTargetPicker,
@@ -200,6 +210,11 @@ fun CaptureDashboardScreen(
                 selectedPacketId = selectedPacket?.id,
                 searchQuery = searchQuery,
                 activeFilter = activeFilter,
+                httpsMitmEnabled = httpsMitmEnabled,
+                caReady = caReady,
+                onToggleHttpsMitm = onToggleHttpsMitm,
+                onInstallCaCert = onInstallCaCert,
+                onSaveCaCert = onSaveCaCert,
                 onSearchChange = onSearchChange,
                 onFilterChange = onFilterChange,
                 onOpenTargetPicker = onOpenTargetPicker,
@@ -226,6 +241,11 @@ private fun CaptureListPane(
     selectedPacketId: Long?,
     searchQuery: String,
     activeFilter: PacketFilterChip,
+    httpsMitmEnabled: Boolean,
+    caReady: Boolean,
+    onToggleHttpsMitm: (Boolean) -> Unit,
+    onInstallCaCert: () -> Unit,
+    onSaveCaCert: () -> Unit,
     onSearchChange: (String) -> Unit,
     onFilterChange: (PacketFilterChip) -> Unit,
     onOpenTargetPicker: () -> Unit,
@@ -248,6 +268,11 @@ private fun CaptureListPane(
                 targetApp = targetApp,
                 targetAppInfo = targetAppInfo,
                 vpnState = vpnState,
+                httpsMitmEnabled = httpsMitmEnabled,
+                caReady = caReady,
+                onToggleHttpsMitm = onToggleHttpsMitm,
+                onInstallCaCert = onInstallCaCert,
+                onSaveCaCert = onSaveCaCert,
                 onOpenTargetPicker = onOpenTargetPicker,
                 onStartCapture = onStartCapture,
                 onStopCapture = onStopCapture
@@ -345,6 +370,11 @@ private fun TargetIsolationHeroCard(
     targetApp: TargetAppSelection,
     targetAppInfo: InstalledAppInfo?,
     vpnState: VpnRuntimeState,
+    httpsMitmEnabled: Boolean,
+    caReady: Boolean,
+    onToggleHttpsMitm: (Boolean) -> Unit,
+    onInstallCaCert: () -> Unit,
+    onSaveCaCert: () -> Unit,
     onOpenTargetPicker: () -> Unit,
     onStartCapture: () -> Unit,
     onStopCapture: () -> Unit
@@ -502,6 +532,97 @@ private fun TargetIsolationHeroCard(
                                 if (isLive) R.string.action_stop_capture else R.string.action_start_capture
                             ),
                             fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    border = BorderStroke(
+                        1.dp,
+                        if (httpsMitmEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            FilterChip(
+                                selected = httpsMitmEnabled,
+                                onClick = { onToggleHttpsMitm(!httpsMitmEnabled) },
+                                enabled = !isLive,
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = if (httpsMitmEnabled) AppIcons.LockOpen else AppIcons.Key,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = if (httpsMitmEnabled) "HTTPS Decrypt ON" else "HTTPS Decrypt OFF",
+                                        maxLines = 1
+                                    )
+                                },
+                                modifier = Modifier.testTag("https_mitm_toggle")
+                            )
+
+                            Spacer(modifier = Modifier.weight(1f))
+
+                            FilledTonalButton(
+                                onClick = onInstallCaCert,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .height(36.dp)
+                                    .testTag("install_ca_button")
+                            ) {
+                                Icon(
+                                    imageVector = AppIcons.Key,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (caReady) "Trust CA" else "Install CA",
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                            }
+
+                            IconButton(
+                                onClick = onSaveCaCert,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("save_ca_button")
+                            ) {
+                                Icon(
+                                    imageVector = AppIcons.FileDownload,
+                                    contentDescription = "Save NetTrace CA to Aryan folder",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = when {
+                                !httpsMitmEnabled -> "Passthrough mode: TLS SNI captured without decrypting HTTPS URLs."
+                                vpnState.pinningBypassCount > 0 ->
+                                    "${vpnState.pinningBypassCount} host(s) enforced SSL Pinning & auto-bypassed to keep traffic alive."
+                                else ->
+                                    "Install NetTrace CA (User Cert) to capture individual HTTPS endpoints like /UpdateSocialBasicInfo."
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }

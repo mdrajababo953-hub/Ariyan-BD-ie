@@ -29,19 +29,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.DataObject
-import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -50,9 +45,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,11 +70,11 @@ import com.example.data.db.CaptureSessionEntity
 import com.example.data.db.CapturedPacketEntity
 import com.example.data.prefs.TargetAppSelection
 import com.example.ui.components.AppIconAvatar
+import com.example.ui.components.AppIcons
 import com.example.ui.components.Formatters
 import com.example.ui.components.PacketRowCard
 import com.example.ui.components.TagChip
 import com.example.ui.theme.CoralAlert
-import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.viewmodel.PacketFilterChip
@@ -98,11 +97,51 @@ fun CaptureDashboardScreen(
     onStopCapture: () -> Unit,
     onOpenImportDialog: () -> Unit,
     onExportSessionJson: () -> Unit,
+    onOpenFullDecode: () -> Unit,
     onSelectPacket: (CapturedPacketEntity) -> Unit,
+    onDeletePacket: (CapturedPacketEntity) -> Unit,
     onShareJson: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit,
     onCopyToast: (String) -> Unit
 ) {
+    var packetPendingDelete by remember { mutableStateOf<CapturedPacketEntity?>(null) }
+
+    packetPendingDelete?.let { pkt ->
+        AlertDialog(
+            onDismissRequest = { packetPendingDelete = null },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = null,
+                    tint = CoralAlert
+                )
+            },
+            title = { Text("Delete Captured Request?") },
+            text = {
+                Text(
+                    text = "Remove ${pkt.method} ${pkt.path.ifBlank { pkt.host }} from this capture session?",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeletePacket(pkt)
+                        packetPendingDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CoralAlert),
+                    modifier = Modifier.testTag("confirm_delete_packet_button")
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { packetPendingDelete = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val isExpanded = maxWidth >= 840.dp
 
@@ -124,7 +163,9 @@ fun CaptureDashboardScreen(
                     onStopCapture = onStopCapture,
                     onOpenImportDialog = onOpenImportDialog,
                     onExportSessionJson = onExportSessionJson,
+                    onOpenFullDecode = onOpenFullDecode,
                     onSelectPacket = onSelectPacket,
+                    onLongClickPacket = { packetPendingDelete = it },
                     modifier = Modifier
                         .weight(0.46f)
                         .fillMaxHeight()
@@ -166,7 +207,9 @@ fun CaptureDashboardScreen(
                 onStopCapture = onStopCapture,
                 onOpenImportDialog = onOpenImportDialog,
                 onExportSessionJson = onExportSessionJson,
+                onOpenFullDecode = onOpenFullDecode,
                 onSelectPacket = onSelectPacket,
+                onLongClickPacket = { packetPendingDelete = it },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -190,7 +233,9 @@ private fun CaptureListPane(
     onStopCapture: () -> Unit,
     onOpenImportDialog: () -> Unit,
     onExportSessionJson: () -> Unit,
+    onOpenFullDecode: () -> Unit,
     onSelectPacket: (CapturedPacketEntity) -> Unit,
+    onLongClickPacket: (CapturedPacketEntity) -> Unit,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -232,7 +277,8 @@ private fun CaptureListPane(
                 activeSession = activeSession,
                 vpnState = vpnState,
                 onOpenImportDialog = onOpenImportDialog,
-                onExportSessionJson = onExportSessionJson
+                onExportSessionJson = onExportSessionJson,
+                onOpenFullDecode = onOpenFullDecode
             )
         }
 
@@ -286,6 +332,7 @@ private fun CaptureListPane(
                     packet = packet,
                     isSelected = packet.id == selectedPacketId,
                     onClick = { onSelectPacket(packet) },
+                    onLongClick = { onLongClickPacket(packet) },
                     modifier = Modifier.testTag("packet_card_${packet.id}")
                 )
             }
@@ -367,7 +414,7 @@ private fun TargetIsolationHeroCard(
                     TagChip(
                         text = if (isLive) "LIVE CAPTURE" else "PER-APP ISOLATED",
                         color = accentColor,
-                        icon = if (isLive) Icons.Default.Radar else Icons.Default.Shield
+                        icon = if (isLive) AppIcons.Radar else AppIcons.Shield
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     Text(
@@ -428,7 +475,7 @@ private fun TargetIsolationHeroCard(
                             .height(48.dp)
                             .testTag("select_target_button")
                     ) {
-                        Icon(Icons.Default.Apps, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(AppIcons.Apps, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Target App")
                     }
@@ -445,7 +492,7 @@ private fun TargetIsolationHeroCard(
                             .testTag("toggle_vpn_capture_button")
                     ) {
                         Icon(
-                            imageVector = if (isLive) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            imageVector = if (isLive) AppIcons.Stop else Icons.Default.PlayArrow,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp)
                         )
@@ -468,7 +515,8 @@ private fun SessionTelemetryBar(
     activeSession: CaptureSessionEntity?,
     vpnState: VpnRuntimeState,
     onOpenImportDialog: () -> Unit,
-    onExportSessionJson: () -> Unit
+    onExportSessionJson: () -> Unit,
+    onOpenFullDecode: () -> Unit
 ) {
     val pktCount = if (vpnState.isRunning) vpnState.packetCount else activeSession?.packetCount ?: 0
     val blkCount = if (vpnState.isRunning) vpnState.blockedCount else activeSession?.blockedCount ?: 0
@@ -505,7 +553,7 @@ private fun SessionTelemetryBar(
                     modifier = Modifier.testTag("import_raw_button")
                 ) {
                     Icon(
-                        Icons.Default.UploadFile,
+                        AppIcons.UploadFile,
                         contentDescription = stringResource(R.string.action_import_raw),
                         tint = MaterialTheme.colorScheme.primary
                     )
@@ -517,10 +565,39 @@ private fun SessionTelemetryBar(
                     modifier = Modifier.testTag("export_session_json_button")
                 ) {
                     Icon(
-                        Icons.Default.FileDownload,
+                        AppIcons.FileDownload,
                         contentDescription = stringResource(R.string.action_export_json),
                         tint = if (activeSession != null) EmeraldPulse else MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+
+            if (activeSession != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    FilledTonalButton(
+                        onClick = onOpenFullDecode,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(38.dp)
+                            .testTag("full_decode_button")
+                    ) {
+                        Icon(
+                            AppIcons.AutoFixHigh,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Full Decode (Save to Aryan)",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
                 }
             }
         }
@@ -549,7 +626,7 @@ private fun EmptyPacketsState(
                     .background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
             ) {
                 Icon(
-                    imageVector = if (isRunning) Icons.Default.Radar else Icons.Default.DataObject,
+                    imageVector = if (isRunning) AppIcons.Radar else AppIcons.DataObject,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(28.dp)
@@ -565,7 +642,7 @@ private fun EmptyPacketsState(
                 text = if (isRunning) {
                     "Launch or interact with your target game/app. All HTTP, TLS, DNS & UDP traffic will stream here."
                 } else {
-                    "Clear your search filter, start a live VPN capture, or import a raw HTTP/Hex dump."
+                    "Clear your search filter, switch filter to All, start VPN capture, or import a raw HTTP/Hex dump."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -573,7 +650,7 @@ private fun EmptyPacketsState(
             if (!isRunning) {
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedButton(onClick = onOpenImportDialog) {
-                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(AppIcons.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Import Raw Capture")
                 }
@@ -593,9 +670,9 @@ private fun EmptyDetailPlaceholder() {
             modifier = Modifier.padding(24.dp)
         ) {
             Icon(
-                imageVector = Icons.Default.Code,
+                imageVector = AppIcons.Code,
                 contentDescription = null,
-                tint = ElectricCyan.copy(alpha = 0.7f),
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
                 modifier = Modifier.size(48.dp)
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -605,7 +682,7 @@ private fun EmptyDetailPlaceholder() {
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Tap any packet on the left to inspect its JSON structure, JWT claims, and decoded Protobuf hex.",
+                text = "Tap any packet to inspect JSON, JWT & Protobuf. Hold a packet to delete it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

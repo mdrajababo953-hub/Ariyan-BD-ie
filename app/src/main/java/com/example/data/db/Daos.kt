@@ -33,6 +33,13 @@ interface CaptureSessionDao {
     @Query("UPDATE capture_sessions SET totalBytes = totalBytes + :bytesDelta WHERE id = :sessionId")
     suspend fun addSessionBytes(sessionId: Long, bytesDelta: Long)
 
+    @Query(
+        "UPDATE capture_sessions SET packetCount = MAX(0, packetCount - 1), " +
+            "blockedCount = MAX(0, blockedCount - :blockedDec), " +
+            "totalBytes = MAX(0, totalBytes - :bytesDelta) WHERE id = :sessionId"
+    )
+    suspend fun decrementSessionStats(sessionId: Long, blockedDec: Int, bytesDelta: Long)
+
     @Query("UPDATE capture_sessions SET isLive = 0, endedAt = :endedAt WHERE id = :sessionId")
     suspend fun finishSession(sessionId: Long, endedAt: Long)
 
@@ -78,6 +85,9 @@ interface CapturedPacketDao {
         bytesRx: Int,
         durationMs: Long
     )
+
+    @Query("DELETE FROM captured_packets WHERE id = :packetId")
+    suspend fun deletePacketById(packetId: Long)
 
     @Query("DELETE FROM captured_packets WHERE sessionId = :sessionId")
     suspend fun clearSessionPackets(sessionId: Long)

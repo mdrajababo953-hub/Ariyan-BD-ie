@@ -90,7 +90,13 @@ class NetTraceVpnService : VpnService() {
     private var tunInterface: ParcelFileDescriptor? = null
     private var captureJob: Job? = null
     private var writerJob: Job? = null
-    private val tunWriteChannel = Channel<ByteArray>(capacity = 512)
+    private var rulesObserverJob: Job? = null
+    private var dbWriteJob: Job? = null
+    private val tunWriteChannel = Channel<ByteArray>(capacity = 1024)
+    private var dbWriteChannel = Channel<suspend () -> Unit>(capacity = 2048)
+
+    @Volatile
+    private var cachedEnabledRules: List<TrafficRuleEntity> = emptyList()
 
     private val dnsHostMap = ConcurrentHashMap<String, String>()
     private val tcpSessions = ConcurrentHashMap<String, TcpFlowSession>()
@@ -99,6 +105,7 @@ class NetTraceVpnService : VpnService() {
     private val packetCounter = AtomicInteger(0)
     private val blockedCounter = AtomicInteger(0)
     private val byteCounter = AtomicLong(0L)
+    @Volatile
     private var activeSessionId: Long = 0L
     private var currentTargetPkg: String = ""
     private var currentTargetLabel: String = ""
@@ -217,6 +224,19 @@ class NetTraceVpnService : VpnService() {
         tunInterface = pfd
         val repo = (application as NetTraceApp).captureRepository
 
+        rulesObserverJob = scope.launch {
+            repo.observeAllRules().collect { allRules ->
+                cachedEnabledRules = allRules.filter { it.isEnabled }
+            }
+        }
+
+        dbWriteChannel = Channel(capacity = 2048)
+        dbWriteJob = scope.launch {
+            for (task in dbWriteChannel) {
+                runCatching { task() }
+            }
+        }
+
         captureJob = scope.launch {
             activeSessionId = repo.startLiveSession(targetLabel, targetPkg)
             _runtimeState.value = VpnRuntimeState(
@@ -253,7 +273,7 @@ class NetTraceVpnService : VpnService() {
         }
     }
 
-    private suspend fun handleUdpPacket(raw: ByteArray, ip: Ipv4Header) {
+    private fun handleUdpPacket(raw: ByteArray, ip: Ipv4Header) {
         val udp = PacketDissector.parseUdp(raw, ip) ?: return
         val host = dnsHostMap[ip.dstIpStr] ?: ip.dstIpStr
         val protoLabel = if (udp.dstPort == 53) "DNS" else "UDP"
@@ -341,7 +361,7 @@ class NetTraceVpnService : VpnService() {
         )
     }
 
-    private suspend fun handleTcpPacket(raw: ByteArray, ip: Ipv4Header) {
+    private fun handleTcpPacket(raw: ByteArray, ip: Ipv4Header) {
         val tcp = PacketDissector.parseTcp(raw, ip) ?: return
         val flowKey = "${ip.srcIpStr}:${tcp.srcPort}->${ip.dstIpStr}:${tcp.dstPort}"
 
@@ -462,39 +482,61 @@ class NetTraceVpnService : VpnService() {
                             val totalBytes = byteCounter.addAndGet(chunk.size.toLong())
                             _runtimeState.value = _runtimeState.value.copy(totalBytes = totalBytes)
 
-                            if (session.recordedPacketId != 0L && activeSessionId != 0L) {
-                                val repo = (application as NetTraceApp).captureRepository
-                                repo.updateCapturedPacketResponse(
-                                    sessionId = activeSessionId,
-                                    packetId = session.recordedPacketId,
-                                    statusCode = session.respStatusCode,
-                                    responseHeadersJson = session.respHeadersJson,
-                                    responseBodyHex = session.respHexBuilder.toString(),
-                                    totalBytesRx = session.rxBytes,
-                                    addedBytesRx = chunk.size,
-                                    durationMs = System.currentTimeMillis() - session.startedAt
-                                )
-                            } else {
+                            val capturedSessionId = activeSessionId
+                            if (capturedSessionId != 0L) {
+                                val respStatus = session.respStatusCode
+                                val respHeaders = session.respHeadersJson
+                                val respHex = session.respHexBuilder.toString()
+                                val totalRx = session.rxBytes
+                                val addedRx = chunk.size
+                                val duration = System.currentTimeMillis() - session.startedAt
                                 val protoGuess = if (httpResp != null) "HTTP" else if (session.serverPort == 443) "HTTPS" else "TCP"
-                                session.recordedPacketId = recordPacket(
-                                    method = session.lastMethod,
-                                    url = "${protoGuess.lowercase()}://${session.hostName}${session.lastPath}",
-                                    host = session.hostName,
-                                    path = session.lastPath,
-                                    port = session.serverPort,
-                                    protocol = protoGuess,
-                                    statusCode = session.respStatusCode,
-                                    reqHeadersJson = session.lastHeadersJson,
-                                    reqHex = session.lastReqHex,
-                                    respHeadersJson = session.respHeadersJson,
-                                    respHex = session.respHexBuilder.toString(),
-                                    durationMs = System.currentTimeMillis() - session.startedAt,
-                                    bytesTx = session.txBytes,
-                                    bytesRx = session.rxBytes,
-                                    isBlocked = false,
-                                    blockReason = null,
-                                    ruleId = null
-                                )
+                                val reqMethod = session.lastMethod
+                                val reqHost = session.hostName
+                                val reqPath = session.lastPath
+                                val reqPort = session.serverPort
+                                val reqHeaders = session.lastHeadersJson
+                                val reqHex = session.lastReqHex
+                                val reqTx = session.txBytes
+
+                                enqueueDbWrite {
+                                    val repo = (application as NetTraceApp).captureRepository
+                                    if (session.recordedPacketId != 0L) {
+                                        repo.updateCapturedPacketResponse(
+                                            sessionId = capturedSessionId,
+                                            packetId = session.recordedPacketId,
+                                            statusCode = respStatus,
+                                            responseHeadersJson = respHeaders,
+                                            responseBodyHex = respHex,
+                                            totalBytesRx = totalRx,
+                                            addedBytesRx = addedRx,
+                                            durationMs = duration
+                                        )
+                                    } else {
+                                        session.recordedPacketId = repo.recordCapturedPacket(
+                                            CapturedPacketEntity(
+                                                sessionId = capturedSessionId,
+                                                timestamp = System.currentTimeMillis(),
+                                                method = reqMethod,
+                                                url = "${protoGuess.lowercase()}://$reqHost$reqPath",
+                                                host = reqHost,
+                                                path = reqPath,
+                                                port = reqPort,
+                                                protocol = protoGuess,
+                                                statusCode = respStatus,
+                                                requestHeadersJson = reqHeaders,
+                                                requestBodyHex = reqHex,
+                                                responseHeadersJson = respHeaders,
+                                                responseBodyHex = respHex,
+                                                durationMs = duration,
+                                                bytesTx = reqTx,
+                                                bytesRx = totalRx,
+                                                isBlocked = false,
+                                                blockReason = null
+                                            )
+                                        )
+                                    }
+                                }
                             }
                         }
                         val fin = PacketBuilder.buildIpv4TcpPacket(
@@ -628,7 +670,7 @@ class NetTraceVpnService : VpnService() {
 
             if (!session.firstTxRecorded) {
                 session.firstTxRecorded = true
-                session.recordedPacketId = recordPacket(
+                recordPacket(
                     method = session.lastMethod,
                     url = "${proto.lowercase()}://${session.hostName}${session.lastPath}",
                     host = session.hostName,
@@ -644,20 +686,21 @@ class NetTraceVpnService : VpnService() {
                     bytesRx = 0,
                     isBlocked = false,
                     blockReason = null,
-                    ruleId = if (postRule?.action == "HIGHLIGHT") postRule.id else null
+                    ruleId = if (postRule?.action == "HIGHLIGHT") postRule.id else null,
+                    onInserted = { id -> session.recordedPacketId = id }
                 )
             }
         }
     }
 
-    private suspend fun matchTrafficRule(
+    private fun matchTrafficRule(
         host: String,
         path: String,
         port: Int,
         protocol: String
     ): TrafficRuleEntity? {
-        val repo = (application as NetTraceApp).captureRepository
-        val rules = repo.getEnabledRulesSync()
+        val rules = cachedEnabledRules
+        if (rules.isEmpty()) return null
         return rules.firstOrNull { rule ->
             val targetOk = rule.targetPackage == "*" || rule.targetPackage == currentTargetPkg
             if (!targetOk) return@firstOrNull false
@@ -671,7 +714,11 @@ class NetTraceVpnService : VpnService() {
         }
     }
 
-    private suspend fun recordPacket(
+    private fun enqueueDbWrite(block: suspend () -> Unit) {
+        dbWriteChannel.trySend(block)
+    }
+
+    private fun recordPacket(
         method: String,
         url: String,
         host: String,
@@ -688,35 +735,11 @@ class NetTraceVpnService : VpnService() {
         bytesRx: Int,
         isBlocked: Boolean,
         blockReason: String?,
-        ruleId: Long?
-    ): Long {
-        if (activeSessionId == 0L) return 0L
-        val repo = (application as NetTraceApp).captureRepository
-        if (ruleId != null) {
-            repo.incrementRuleHit(ruleId)
-        }
-        val insertedId = repo.recordCapturedPacket(
-            CapturedPacketEntity(
-                sessionId = activeSessionId,
-                timestamp = System.currentTimeMillis(),
-                method = method,
-                url = url,
-                host = host,
-                path = path,
-                port = port,
-                protocol = protocol,
-                statusCode = statusCode,
-                requestHeadersJson = reqHeadersJson,
-                requestBodyHex = reqHex,
-                responseHeadersJson = respHeadersJson,
-                responseBodyHex = respHex,
-                durationMs = durationMs,
-                bytesTx = bytesTx,
-                bytesRx = bytesRx,
-                isBlocked = isBlocked,
-                blockReason = blockReason
-            )
-        )
+        ruleId: Long?,
+        onInserted: ((Long) -> Unit)? = null
+    ) {
+        val capturedSessionId = activeSessionId
+        if (capturedSessionId == 0L) return
 
         val count = packetCounter.incrementAndGet()
         val blocked = if (isBlocked) blockedCounter.incrementAndGet() else blockedCounter.get()
@@ -726,10 +749,38 @@ class NetTraceVpnService : VpnService() {
             blockedCount = blocked,
             totalBytes = total
         )
-        if (count % 5 == 0 || isBlocked) {
+        if (count % 10 == 0 || isBlocked) {
             updateNotification(currentTargetLabel, count)
         }
-        return insertedId
+
+        val entity = CapturedPacketEntity(
+            sessionId = capturedSessionId,
+            timestamp = System.currentTimeMillis(),
+            method = method,
+            url = url,
+            host = host,
+            path = path,
+            port = port,
+            protocol = protocol,
+            statusCode = statusCode,
+            requestHeadersJson = reqHeadersJson,
+            requestBodyHex = reqHex,
+            responseHeadersJson = respHeadersJson,
+            responseBodyHex = respHex,
+            durationMs = durationMs,
+            bytesTx = bytesTx,
+            bytesRx = bytesRx,
+            isBlocked = isBlocked,
+            blockReason = blockReason
+        )
+        enqueueDbWrite {
+            val repo = (application as NetTraceApp).captureRepository
+            if (ruleId != null) {
+                repo.incrementRuleHit(ruleId)
+            }
+            val insertedId = repo.recordCapturedPacket(entity)
+            onInserted?.invoke(insertedId)
+        }
     }
 
     private fun closeTcpSession(session: TcpFlowSession) {
@@ -742,6 +793,11 @@ class NetTraceVpnService : VpnService() {
         captureJob = null
         writerJob?.cancel()
         writerJob = null
+        rulesObserverJob?.cancel()
+        rulesObserverJob = null
+        dbWriteJob?.cancel()
+        dbWriteJob = null
+        dbWriteChannel.close()
         tcpSessions.values.forEach { closeTcpSession(it) }
         tcpSessions.clear()
         udpSockets.values.forEach {

@@ -3,10 +3,12 @@ package com.example.ui.components
 import android.graphics.drawable.Drawable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,12 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.DataObject
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,7 +44,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -153,17 +152,20 @@ fun MethodBadge(method: String, isBlocked: Boolean = false) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PacketRowCard(
     packet: CapturedPacketEntity,
     isSelected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val haptic = LocalHapticFeedback.current
     val respClassification = remember(packet.responseBodyHex, packet.requestBodyHex) {
         when {
-            packet.responseBodyHex.isNotEmpty() -> PayloadAnalyzer.analyze(packet.responseBodyHex).classification
-            packet.requestBodyHex.isNotEmpty() -> PayloadAnalyzer.analyze(packet.requestBodyHex).classification
+            packet.responseBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.responseBodyHex)
+            packet.requestBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.requestBodyHex)
             else -> PayloadClassification.EMPTY
         }
     }
@@ -179,7 +181,13 @@ fun PacketRowCard(
             .fillMaxWidth()
             .minimumInteractiveComponentSize()
             .clip(RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick()
+                }
+            ),
         color = if (isSelected) {
             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
         } else {
@@ -201,7 +209,7 @@ fun PacketRowCard(
                     TagChip(
                         text = "BLOCKED",
                         color = CoralAlert,
-                        icon = Icons.Default.Block
+                        icon = AppIcons.Block
                     )
                 } else if (packet.statusCode != null) {
                     val statusColor = if (packet.statusCode in 200..299) EmeraldPulse else AmberSignal
@@ -222,7 +230,7 @@ fun PacketRowCard(
                     TagChip(
                         text = "PROTO",
                         color = VioletProto,
-                        icon = Icons.Default.DataObject
+                        icon = AppIcons.DataObject
                     )
                 } else if (respClassification == PayloadClassification.ENCRYPTED_BLOCK) {
                     TagChip(
@@ -392,7 +400,7 @@ fun SyntaxHighlightedJsonBlock(
                         modifier = Modifier.size(36.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.ContentCopy,
+                            imageVector = AppIcons.ContentCopy,
                             contentDescription = stringResource(R.string.cd_copy),
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(16.dp)
@@ -545,7 +553,7 @@ private fun ProtobufNodeCard(node: ProtobufFieldNode, depth: Int) {
 
                 if (hasChildren) {
                     Icon(
-                        imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        imageVector = if (expanded) AppIcons.ExpandLess else AppIcons.ExpandMore,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp)
@@ -617,7 +625,7 @@ fun PythonFieldsCodeBlock(
                     modifier = Modifier.size(36.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.ContentCopy,
+                        imageVector = AppIcons.ContentCopy,
                         contentDescription = stringResource(R.string.cd_copy),
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(16.dp)

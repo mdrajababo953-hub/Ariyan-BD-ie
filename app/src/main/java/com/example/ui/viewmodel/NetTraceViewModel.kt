@@ -9,16 +9,22 @@ import com.example.data.db.CaptureSessionEntity
 import com.example.data.db.CapturedPacketEntity
 import com.example.data.db.TrafficRuleEntity
 import com.example.data.prefs.AppSettings
+import com.example.decoder.BatchDecodeExporter
 import com.example.decoder.DecryptMode
+import com.example.decoder.FullDecodeResult
+import com.example.decoder.FullDecodeScope
 import com.example.decoder.HexUtils
 import com.example.decoder.JwtDecodeResult
 import com.example.decoder.JwtDecoder
 import com.example.decoder.PacketJsonSerializer
 import com.example.decoder.PayloadAnalysis
 import com.example.decoder.PayloadAnalyzer
+import com.example.decoder.PayloadClassification
 import com.example.decoder.PayloadDecryptor
+import com.example.ui.theme.AppAccentTheme
 import com.example.vpn.NetTraceVpnService
 import com.example.vpn.VpnRuntimeState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -27,16 +33,28 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 enum class PacketFilterChip(val label: String) {
-    ALL("All"),
     HTTP_HTTPS("HTTP/S"),
+    ALL("All"),
     PROTOBUF("Protobuf"),
     BLOCKED("Blocked"),
     DNS_UDP("DNS/UDP")
 }
+
+data class FullDecodeUiState(
+    val isDialogOpen: Boolean = false,
+    val isRunning: Boolean = false,
+    val processed: Int = 0,
+    val total: Int = 0,
+    val selectedScope: FullDecodeScope = FullDecodeScope.HTTP_HTTPS,
+    val targetSessionId: Long? = null,
+    val result: FullDecodeResult? = null,
+    val error: String? = null
+)
 
 data class DecoderLabState(
     val inputText: String = "",
@@ -90,7 +108,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    private val _filterChip = MutableStateFlow(PacketFilterChip.ALL)
+    private val _filterChip = MutableStateFlow(PacketFilterChip.HTTP_HTTPS)
     val filterChip: StateFlow<PacketFilterChip> = _filterChip.asStateFlow()
 
     private val _installedApps = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
@@ -101,6 +119,9 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
 
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
+
+    private val _fullDecodeState = MutableStateFlow(FullDecodeUiState())
+    val fullDecodeState: StateFlow<FullDecodeUiState> = _fullDecodeState.asStateFlow()
 
     private val _decoderLab = MutableStateFlow(
         DecoderLabState(
@@ -147,21 +168,21 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
 
             val matchesChip = when (chip) {
                 PacketFilterChip.ALL -> true
-                PacketFilterChip.HTTP_HTTPS -> pkt.protocol in listOf("HTTP", "HTTPS")
+                PacketFilterChip.HTTP_HTTPS -> pkt.protocol.equals("HTTP", true) || pkt.protocol.equals("HTTPS", true)
                 PacketFilterChip.PROTOBUF -> {
                     val reqProto = pkt.requestBodyHex.isNotEmpty() &&
-                        PayloadAnalyzer.analyze(pkt.requestBodyHex).protobuf != null
+                        PayloadAnalyzer.quickClassify(pkt.requestBodyHex) == PayloadClassification.PROTOBUF
                     val respProto = pkt.responseBodyHex.isNotEmpty() &&
-                        PayloadAnalyzer.analyze(pkt.responseBodyHex).protobuf != null
+                        PayloadAnalyzer.quickClassify(pkt.responseBodyHex) == PayloadClassification.PROTOBUF
                     reqProto || respProto
                 }
                 PacketFilterChip.BLOCKED -> pkt.isBlocked
-                PacketFilterChip.DNS_UDP -> pkt.protocol in listOf("DNS", "UDP")
+                PacketFilterChip.DNS_UDP -> pkt.protocol.equals("DNS", true) || pkt.protocol.equals("UDP", true)
             }
 
             matchesQuery && matchesChip
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val selectedPacket: StateFlow<CapturedPacketEntity?> = _selectedPacketId.flatMapLatest { id ->
         if (id == null) flowOf(null) else repo.observePacketById(id)
@@ -222,6 +243,12 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun setAccentTheme(theme: AppAccentTheme) {
+        viewModelScope.launch {
+            prefs.setAccentTheme(theme)
+        }
+    }
+
     fun startVpnCapture() {
         val target = settings.value.targetApp
         if (target.packageName.isBlank()) {
@@ -244,6 +271,80 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
                 _selectedPacketId.value = null
             }
             _snackbarMessage.value = "Session deleted."
+        }
+    }
+
+    fun deletePacket(packet: CapturedPacketEntity) {
+        viewModelScope.launch {
+            repo.deletePacket(packet)
+            if (_selectedPacketId.value == packet.id) {
+                _selectedPacketId.value = null
+            }
+            _snackbarMessage.value = "Deleted ${packet.method} ${packet.path.ifBlank { packet.host }}"
+        }
+    }
+
+    fun openFullDecodeDialog(sessionId: Long? = null) {
+        _fullDecodeState.value = FullDecodeUiState(
+            isDialogOpen = true,
+            targetSessionId = sessionId ?: activeSession.value?.id,
+            selectedScope = FullDecodeScope.HTTP_HTTPS
+        )
+    }
+
+    fun dismissFullDecodeDialog() {
+        if (!_fullDecodeState.value.isRunning) {
+            _fullDecodeState.value = FullDecodeUiState(isDialogOpen = false)
+        }
+    }
+
+    fun runFullDecode(scope: FullDecodeScope) {
+        val targetSid = _fullDecodeState.value.targetSessionId ?: activeSession.value?.id
+        if (targetSid == null || targetSid == 0L) {
+            _fullDecodeState.value = _fullDecodeState.value.copy(
+                error = "No active capture session found."
+            )
+            return
+        }
+        viewModelScope.launch {
+            _fullDecodeState.value = _fullDecodeState.value.copy(
+                isRunning = true,
+                selectedScope = scope,
+                processed = 0,
+                total = 0,
+                result = null,
+                error = null
+            )
+            val sessionEntity = sessions.value.firstOrNull { it.id == targetSid }
+            val packets = repo.getPacketsForSessionOnce(targetSid)
+            val outcome = BatchDecodeExporter.decodeAndSaveToAryanFolder(
+                context = app,
+                session = sessionEntity,
+                packets = packets,
+                scope = scope,
+                onProgress = { done, total ->
+                    _fullDecodeState.value = _fullDecodeState.value.copy(
+                        processed = done,
+                        total = total
+                    )
+                }
+            )
+            outcome.fold(
+                onSuccess = { res ->
+                    _fullDecodeState.value = _fullDecodeState.value.copy(
+                        isRunning = false,
+                        result = res,
+                        error = null
+                    )
+                    _snackbarMessage.value = "Saved ${res.decodedCount} decoded requests to ${res.displayPath}"
+                },
+                onFailure = { err ->
+                    _fullDecodeState.value = _fullDecodeState.value.copy(
+                        isRunning = false,
+                        error = err.message ?: "Full decode export failed."
+                    )
+                }
+            )
         }
     }
 

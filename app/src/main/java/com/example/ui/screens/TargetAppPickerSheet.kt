@@ -21,7 +21,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -49,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.apps.InstalledAppInfo
 import com.example.ui.components.AppIconAvatar
+import com.example.ui.components.AppIcons
 import com.example.ui.components.TagChip
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
@@ -145,7 +145,7 @@ fun TargetAppPickerSheet(
                     label = { Text("Games Only") },
                     leadingIcon = {
                         Icon(
-                            Icons.Default.SportsEsports,
+                            AppIcons.SportsEsports,
                             contentDescription = null,
                             modifier = Modifier.size(16.dp)
                         )

@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.ui.theme.AppAccentTheme
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -23,7 +24,8 @@ data class AppSettings(
     val targetApp: TargetAppSelection = TargetAppSelection(),
     val activeSessionId: Long = 0L,
     val darkTheme: Boolean = true,
-    val autoDecodeOnOpen: Boolean = true
+    val autoDecodeOnOpen: Boolean = true,
+    val accentTheme: AppAccentTheme = AppAccentTheme.CYAN
 )
 
 class UserPreferencesRepository(private val context: Context) {
@@ -34,6 +36,7 @@ class UserPreferencesRepository(private val context: Context) {
         val ACTIVE_SESSION_ID = longPreferencesKey("active_session_id")
         val DARK_THEME = booleanPreferencesKey("dark_theme")
         val AUTO_DECODE = booleanPreferencesKey("auto_decode")
+        val ACCENT_THEME = stringPreferencesKey("accent_theme")
     }
 
     val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -45,7 +48,8 @@ class UserPreferencesRepository(private val context: Context) {
             ),
             activeSessionId = prefs[Keys.ACTIVE_SESSION_ID] ?: 0L,
             darkTheme = prefs[Keys.DARK_THEME] ?: true,
-            autoDecodeOnOpen = prefs[Keys.AUTO_DECODE] ?: true
+            autoDecodeOnOpen = prefs[Keys.AUTO_DECODE] ?: true,
+            accentTheme = AppAccentTheme.fromName(prefs[Keys.ACCENT_THEME])
         )
     }
 
@@ -66,6 +70,12 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun setDarkTheme(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.DARK_THEME] = enabled
+        }
+    }
+
+    suspend fun setAccentTheme(theme: AppAccentTheme) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.ACCENT_THEME] = theme.name
         }
     }
 }

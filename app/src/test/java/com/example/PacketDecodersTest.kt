@@ -145,4 +145,76 @@ class PacketDecodersTest {
         assertEquals(200L, tcp.ackNum)
         assertTrue(tcp.payload.contentEquals(byteArrayOf(9, 8, 7)))
     }
+
+    @Test
+    fun `quickClassify matches analyze classification for protobuf json encrypted and empty`() {
+        assertEquals(PayloadClassification.EMPTY, PayloadAnalyzer.quickClassify(""))
+        assertEquals(
+            PayloadClassification.PROTOBUF,
+            PayloadAnalyzer.quickClassify("08f4f3c8cf3d102618ad0220ad02300170807d8001ad028801cc08a80101b001019a0200")
+        )
+        assertEquals(
+            PayloadClassification.ENCRYPTED_BLOCK,
+            PayloadAnalyzer.quickClassify("9b886fb750efb187097dbbb281be7bae")
+        )
+        val jsonHex = HexUtils.bytesToHex("{\"ok\":true}".toByteArray())
+        assertEquals(PayloadClassification.JSON, PayloadAnalyzer.quickClassify(jsonHex))
+    }
+
+    @Test
+    fun `batch decode exporter filters protocols and builds combined aryan json`() = kotlinx.coroutines.test.runTest {
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val httpsPkt = com.example.data.db.CapturedPacketEntity(
+            id = 1,
+            sessionId = 1,
+            timestamp = 1000L,
+            method = "POST",
+            url = "https://clientbp.ggpolarbear.com/GetLikedRecord",
+            host = "clientbp.ggpolarbear.com",
+            path = "/GetLikedRecord",
+            port = 443,
+            protocol = "HTTPS",
+            statusCode = 200,
+            requestHeadersJson = "{}",
+            requestBodyHex = "1a725b2c56ec52ba7d09623454c0a003",
+            responseHeadersJson = "{}",
+            responseBodyHex = "0a00",
+            durationMs = 10,
+            bytesTx = 16,
+            bytesRx = 2,
+            isBlocked = false,
+            blockReason = null
+        )
+        val udpPkt = httpsPkt.copy(
+            id = 2,
+            method = "UDP",
+            url = "udp://1.1.1.1:443",
+            host = "1.1.1.1",
+            path = "/",
+            protocol = "UDP",
+            requestBodyHex = "08f4f3c8cf3d",
+            responseBodyHex = ""
+        )
+        val all = listOf(httpsPkt, udpPkt)
+
+        assertEquals(1, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.HTTP_HTTPS).size)
+        assertEquals(1, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.UDP_DNS).size)
+        assertEquals(1, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.TCP).size)
+        assertEquals(2, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.ALL).size)
+
+        val result = com.example.decoder.BatchDecodeExporter.decodeAndSaveToAryanFolder(
+            context = ctx,
+            session = null,
+            packets = all,
+            scope = com.example.decoder.FullDecodeScope.HTTP_HTTPS,
+            onProgress = { _, _ -> }
+        )
+        assertTrue(result.isSuccess)
+        val res = result.getOrThrow()
+        assertEquals(1, res.decodedCount)
+        assertTrue(res.displayPath.contains("Aryan"))
+        assertTrue(res.jsonContent.contains("\"sourceLink\": \"https:\\/\\/clientbp.ggpolarbear.com\\/GetLikedRecord\"") ||
+            res.jsonContent.contains("clientbp.ggpolarbear.com/GetLikedRecord"))
+        assertTrue(res.jsonContent.contains("\"decodedProtobuf\""))
+    }
 }

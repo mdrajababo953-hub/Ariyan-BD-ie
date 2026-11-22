@@ -18,10 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,6 +36,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.db.CaptureSessionEntity
+import com.example.ui.components.AppIcons
 import com.example.ui.components.Formatters
 import com.example.ui.components.TagChip
 import com.example.ui.theme.AmberSignal
@@ -52,6 +50,7 @@ fun SessionsScreen(
     activeSessionId: Long,
     onSelectSession: (Long) -> Unit,
     onExportSessionJson: (Long) -> Unit,
+    onFullDecodeSession: (Long) -> Unit,
     onDeleteSession: (Long) -> Unit,
     onOpenImportDialog: () -> Unit
 ) {
@@ -80,7 +79,7 @@ fun SessionsScreen(
                     onClick = onOpenImportDialog,
                     modifier = Modifier.testTag("sessions_import_button")
                 ) {
-                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(AppIcons.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Import")
                 }
@@ -97,7 +96,7 @@ fun SessionsScreen(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
-                            Icons.Default.FolderOpen,
+                            AppIcons.FolderOpen,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(44.dp)
@@ -179,11 +178,22 @@ fun SessionsScreen(
                             }
 
                             IconButton(
+                                onClick = { onFullDecodeSession(session.id) },
+                                modifier = Modifier.testTag("full_decode_session_${session.id}")
+                            ) {
+                                Icon(
+                                    AppIcons.AutoFixHigh,
+                                    contentDescription = "Full Decode to Aryan",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+
+                            IconButton(
                                 onClick = { onExportSessionJson(session.id) },
                                 modifier = Modifier.testTag("export_session_${session.id}")
                             ) {
                                 Icon(
-                                    Icons.Default.FileDownload,
+                                    AppIcons.FileDownload,
                                     contentDescription = stringResource(R.string.action_export_json),
                                     tint = EmeraldPulse
                                 )
@@ -195,7 +205,7 @@ fun SessionsScreen(
                                     modifier = Modifier.testTag("delete_session_${session.id}")
                                 ) {
                                     Icon(
-                                        Icons.Default.DeleteOutline,
+                                        Icons.Default.Delete,
                                         contentDescription = stringResource(R.string.cd_delete),
                                         tint = CoralAlert
                                     )

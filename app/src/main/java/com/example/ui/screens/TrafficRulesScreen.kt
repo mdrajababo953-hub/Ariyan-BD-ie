@@ -17,9 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -45,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.db.TrafficRuleEntity
 import com.example.data.prefs.TargetAppSelection
+import com.example.ui.components.AppIcons
 import com.example.ui.components.TagChip
 import com.example.ui.theme.AmberSignal
 import com.example.ui.theme.CoralAlert
@@ -142,7 +141,7 @@ fun TrafficRulesScreen(
                         modifier = Modifier.padding(24.dp)
                     ) {
                         Icon(
-                            Icons.Default.Security,
+                            AppIcons.ShieldOutlined,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(40.dp)
@@ -188,7 +187,7 @@ fun TrafficRulesScreen(
                                 TagChip(
                                     text = rule.action,
                                     color = actionColor,
-                                    icon = if (rule.action == "BLOCK") Icons.Default.Block else null
+                                    icon = if (rule.action == "BLOCK") AppIcons.Block else null
                                 )
                                 TagChip(text = rule.matchType, color = MaterialTheme.colorScheme.primary)
                                 if (rule.hitCount > 0) {
@@ -218,7 +217,7 @@ fun TrafficRulesScreen(
                             modifier = Modifier.testTag("delete_rule_${rule.id}")
                         ) {
                             Icon(
-                                Icons.Default.DeleteOutline,
+                                Icons.Default.Delete,
                                 contentDescription = stringResource(R.string.cd_delete),
                                 tint = CoralAlert
                             )

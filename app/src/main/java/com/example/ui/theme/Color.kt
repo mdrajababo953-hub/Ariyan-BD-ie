@@ -34,3 +34,81 @@ val PrimaryOcean = Color(0xFF007EA7)
 val PrimaryOceanContainer = Color(0xFFD0F0FF)
 val TextPrimaryLight = Color(0xFF0F172A)
 val TextSecondaryLight = Color(0xFF475569)
+
+enum class AppAccentTheme(
+    val displayName: String,
+    val darkPrimary: Color,
+    val darkOnPrimary: Color,
+    val darkContainer: Color,
+    val darkOnContainer: Color,
+    val lightPrimary: Color,
+    val lightContainer: Color,
+    val lightOnContainer: Color
+) {
+    CYAN(
+        displayName = "Cyan",
+        darkPrimary = Color(0xFF00E5FF),
+        darkOnPrimary = Color(0xFF002026),
+        darkContainer = Color(0xFF003B47),
+        darkOnContainer = Color(0xFFA6F7FF),
+        lightPrimary = Color(0xFF007EA7),
+        lightContainer = Color(0xFFD0F0FF),
+        lightOnContainer = Color(0xFF002635)
+    ),
+    EMERALD(
+        displayName = "Emerald",
+        darkPrimary = Color(0xFF10B981),
+        darkOnPrimary = Color(0xFF002116),
+        darkContainer = Color(0xFF063A2A),
+        darkOnContainer = Color(0xFFA7F3D0),
+        lightPrimary = Color(0xFF059669),
+        lightContainer = Color(0xFFD1FAE5),
+        lightOnContainer = Color(0xFF064E3B)
+    ),
+    VIOLET(
+        displayName = "Violet",
+        darkPrimary = Color(0xFFA78BFA),
+        darkOnPrimary = Color(0xFF1E1042),
+        darkContainer = Color(0xFF2B1E52),
+        darkOnContainer = Color(0xFFEDE9FE),
+        lightPrimary = Color(0xFF7C3AED),
+        lightContainer = Color(0xFFEDE9FE),
+        lightOnContainer = Color(0xFF2E1065)
+    ),
+    AMBER(
+        displayName = "Amber",
+        darkPrimary = Color(0xFFF59E0B),
+        darkOnPrimary = Color(0xFF281800),
+        darkContainer = Color(0xFF422904),
+        darkOnContainer = Color(0xFFFDE68A),
+        lightPrimary = Color(0xFFD97706),
+        lightContainer = Color(0xFFFEF3C7),
+        lightOnContainer = Color(0xFF78350F)
+    ),
+    CRIMSON(
+        displayName = "Crimson",
+        darkPrimary = Color(0xFFF43F5E),
+        darkOnPrimary = Color.White,
+        darkContainer = Color(0xFF4C0519),
+        darkOnContainer = Color(0xFFFFE4E6),
+        lightPrimary = Color(0xFFE11D48),
+        lightContainer = Color(0xFFFFE4E6),
+        lightOnContainer = Color(0xFF881337)
+    ),
+    COBALT(
+        displayName = "Cobalt",
+        darkPrimary = Color(0xFF3B82F6),
+        darkOnPrimary = Color.White,
+        darkContainer = Color(0xFF172554),
+        darkOnContainer = Color(0xFFDBEAFE),
+        lightPrimary = Color(0xFF2563EB),
+        lightContainer = Color(0xFFDBEAFE),
+        lightOnContainer = Color(0xFF1E3A8A)
+    );
+
+    companion object {
+        fun fromName(name: String?): AppAccentTheme {
+            return entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: CYAN
+        }
+    }
+}

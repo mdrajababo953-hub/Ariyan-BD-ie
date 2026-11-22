@@ -89,6 +89,20 @@ class CaptureRepository(private val db: NetTraceDatabase) {
         }
     }
 
+    suspend fun deletePacket(packet: CapturedPacketEntity) {
+        packetDao.deletePacketById(packet.id)
+        val bytes = (packet.bytesTx + packet.bytesRx).toLong()
+        sessionDao.decrementSessionStats(
+            sessionId = packet.sessionId,
+            blockedDec = if (packet.isBlocked) 1 else 0,
+            bytesDelta = bytes
+        )
+    }
+
+    suspend fun getPacketsForSessionOnce(sessionId: Long): List<CapturedPacketEntity> {
+        return packetDao.getPacketsForSessionOnce(sessionId)
+    }
+
     suspend fun getEnabledRulesSync(): List<TrafficRuleEntity> = ruleDao.getEnabledRulesSync()
 
     suspend fun incrementRuleHit(ruleId: Long) = ruleDao.incrementHitCount(ruleId)

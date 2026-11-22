@@ -22,13 +22,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.DataObject
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -74,6 +67,7 @@ import com.example.decoder.PayloadAnalyzer
 import com.example.decoder.PayloadClassification
 import com.example.decoder.PayloadDecryptor
 import com.example.decoder.ProtobufFieldsFormatter
+import com.example.ui.components.AppIcons
 import com.example.ui.components.Formatters
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtobufTreeView
@@ -234,7 +228,7 @@ fun PacketDetailScreen(
                             },
                             modifier = Modifier.testTag("detail_copy_json_button")
                         ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = stringResource(R.string.cd_copy))
+                            Icon(AppIcons.ContentCopy, contentDescription = stringResource(R.string.cd_copy))
                         }
                         IconButton(
                             onClick = { onShareJson(packetJson) },
@@ -281,7 +275,7 @@ fun PacketDetailScreen(
                             },
                             modifier = Modifier.testTag("detail_copy_json_button")
                         ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = stringResource(R.string.cd_copy))
+                            Icon(AppIcons.ContentCopy, contentDescription = stringResource(R.string.cd_copy))
                         }
                         IconButton(
                             onClick = { onShareJson(packetJson) },
@@ -364,7 +358,7 @@ fun JwtDecodedCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(
-                    imageVector = Icons.Default.Key,
+                    imageVector = AppIcons.Key,
                     contentDescription = null,
                     tint = EmeraldPulse,
                     modifier = Modifier.size(18.dp)
@@ -443,7 +437,7 @@ fun JwtDecodedCard(
                     color = MaterialTheme.colorScheme.primary
                 )
                 Icon(
-                    imageVector = if (showRawJson) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    imageVector = if (showRawJson) AppIcons.ExpandLess else AppIcons.ExpandMore,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(18.dp)
@@ -511,7 +505,7 @@ fun PayloadDecodedSection(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(
-                    imageVector = Icons.Default.DataObject,
+                    imageVector = AppIcons.DataObject,
                     contentDescription = null,
                     tint = badgeColor,
                     modifier = Modifier.size(18.dp)
@@ -624,7 +618,7 @@ fun PayloadDecodedSection(
                         onClick = { showDecryptor = !showDecryptor },
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Default.LockOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(AppIcons.LockOpen, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(if (showDecryptor) "Hide Key Tool" else "AES / XOR Key")
                     }
@@ -632,7 +626,7 @@ fun PayloadDecodedSection(
                         onClick = { onSendToDecoderLab(rawHex) },
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Default.Code, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(AppIcons.Code, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Open in Lab")
                     }
@@ -793,7 +787,7 @@ private fun JsonTabContent(
                         .weight(1f)
                         .testTag("json_tab_copy_button")
                 ) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(AppIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(stringResource(R.string.action_copy_json))
                 }
@@ -938,7 +932,7 @@ private fun HexBlockCard(
                 if (rawHex.isNotEmpty()) {
                     IconButton(onClick = onCopyHex, modifier = Modifier.size(36.dp)) {
                         Icon(
-                            Icons.Default.ContentCopy,
+                            AppIcons.ContentCopy,
                             contentDescription = stringResource(R.string.cd_copy),
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(16.dp)

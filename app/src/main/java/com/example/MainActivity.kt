@@ -12,6 +12,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -22,18 +26,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.LightMode
-import androidx.compose.material.icons.filled.Radar
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.outlined.Code
-import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.Radar
-import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -57,6 +55,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -65,14 +64,17 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ui.components.AppIcons
 import com.example.ui.components.TagChip
 import com.example.ui.screens.CaptureDashboardScreen
 import com.example.ui.screens.DecoderLabScreen
+import com.example.ui.screens.FullDecodeDialog
 import com.example.ui.screens.ImportRawDialog
 import com.example.ui.screens.PacketDetailScreen
 import com.example.ui.screens.SessionsScreen
 import com.example.ui.screens.TargetAppPickerSheet
 import com.example.ui.screens.TrafficRulesScreen
+import com.example.ui.theme.AppAccentTheme
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.NetTraceTheme
 import com.example.ui.viewmodel.NetTraceViewModel
@@ -84,10 +86,10 @@ enum class MainTab(
     val unselectedIcon: ImageVector,
     val testTag: String
 ) {
-    CAPTURE(R.string.nav_capture, Icons.Filled.Radar, Icons.Outlined.Radar, "nav_capture"),
-    SESSIONS(R.string.nav_sessions, Icons.Filled.Folder, Icons.Outlined.Folder, "nav_sessions"),
-    RULES(R.string.nav_rules, Icons.Filled.Security, Icons.Outlined.Security, "nav_rules"),
-    DECODER(R.string.nav_decoder, Icons.Filled.Code, Icons.Outlined.Code, "nav_decoder")
+    CAPTURE(R.string.nav_capture, AppIcons.Radar, AppIcons.Radar, "nav_capture"),
+    SESSIONS(R.string.nav_sessions, AppIcons.Folder, AppIcons.FolderOpen, "nav_sessions"),
+    RULES(R.string.nav_rules, AppIcons.Shield, AppIcons.ShieldOutlined, "nav_rules"),
+    DECODER(R.string.nav_decoder, AppIcons.Code, AppIcons.Code, "nav_decoder")
 }
 
 class MainActivity : ComponentActivity() {
@@ -116,11 +118,13 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
     val isLoadingApps by vm.isLoadingApps.collectAsStateWithLifecycle()
     val trafficRules by vm.trafficRules.collectAsStateWithLifecycle()
     val decoderLabState by vm.decoderLab.collectAsStateWithLifecycle()
+    val fullDecodeState by vm.fullDecodeState.collectAsStateWithLifecycle()
     val snackbarMsg by vm.snackbarMessage.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(MainTab.CAPTURE) }
     var showTargetPicker by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
+    var showColorMenu by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
@@ -183,7 +187,10 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
         installedApps.firstOrNull { it.packageName == settings.targetApp.packageName }
     }
 
-    NetTraceTheme(darkTheme = settings.darkTheme) {
+    NetTraceTheme(
+        darkTheme = settings.darkTheme,
+        accentTheme = settings.accentTheme
+    ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val useRail = maxWidth >= 600.dp
             val isExpanded = maxWidth >= 840.dp
@@ -223,12 +230,83 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                 }
                             },
                             actions = {
+                                Box {
+                                    IconButton(
+                                        onClick = { showColorMenu = true },
+                                        modifier = Modifier.testTag("accent_color_picker_button")
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = AppIcons.Palette,
+                                                contentDescription = "Choose accent color",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(21.dp)
+                                            )
+                                        }
+                                    }
+
+                                    DropdownMenu(
+                                        expanded = showColorMenu,
+                                        onDismissRequest = { showColorMenu = false }
+                                    ) {
+                                        Column(
+                                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                                        ) {
+                                            Text(
+                                                text = "Theme Color",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Row(
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                AppAccentTheme.entries.forEach { option ->
+                                                    val swatchColor = if (settings.darkTheme) option.darkPrimary else option.lightPrimary
+                                                    val selected = settings.accentTheme == option
+                                                    Box(
+                                                        contentAlignment = Alignment.Center,
+                                                        modifier = Modifier
+                                                            .size(32.dp)
+                                                            .clip(CircleShape)
+                                                            .background(swatchColor)
+                                                            .then(
+                                                                if (selected) {
+                                                                    Modifier.border(
+                                                                        2.dp,
+                                                                        MaterialTheme.colorScheme.onSurface,
+                                                                        CircleShape
+                                                                    )
+                                                                } else Modifier
+                                                            )
+                                                            .clickable {
+                                                                vm.setAccentTheme(option)
+                                                                showColorMenu = false
+                                                            }
+                                                            .testTag("accent_swatch_${option.name.lowercase()}")
+                                                    ) {
+                                                        if (selected) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Check,
+                                                                contentDescription = option.displayName,
+                                                                tint = if (settings.darkTheme) option.darkOnPrimary else MaterialTheme.colorScheme.onPrimary,
+                                                                modifier = Modifier.size(16.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 IconButton(
                                     onClick = { vm.toggleTheme() },
                                     modifier = Modifier.testTag("theme_toggle_button")
                                 ) {
                                     Icon(
-                                        imageVector = if (settings.darkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                        imageVector = if (settings.darkTheme) AppIcons.LightMode else AppIcons.DarkMode,
                                         contentDescription = "Toggle theme",
                                         modifier = Modifier.size(22.dp)
                                     )
@@ -311,7 +389,11 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                     onExportSessionJson = {
                                         vm.exportActiveSessionJson(shareJsonText)
                                     },
+                                    onOpenFullDecode = {
+                                        vm.openFullDecodeDialog()
+                                    },
                                     onSelectPacket = { pkt -> vm.selectPacket(pkt.id) },
+                                    onDeletePacket = vm::deletePacket,
                                     onShareJson = shareJsonText,
                                     onSendToDecoderLab = { hex ->
                                         vm.sendHexToDecoderLab(hex)
@@ -330,6 +412,9 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                     },
                                     onExportSessionJson = { sid ->
                                         vm.exportSessionJson(sid, shareJsonText)
+                                    },
+                                    onFullDecodeSession = { sid ->
+                                        vm.openFullDecodeDialog(sid)
                                     },
                                     onDeleteSession = vm::deleteSession,
                                     onOpenImportDialog = { showImportDialog = true }
@@ -377,6 +462,15 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                         currentTab = MainTab.CAPTURE
                     }
                 }
+            )
+        }
+
+        if (fullDecodeState.isDialogOpen) {
+            FullDecodeDialog(
+                state = fullDecodeState,
+                onSelectAndRun = vm::runFullDecode,
+                onShareJson = shareJsonText,
+                onDismiss = vm::dismissFullDecodeDialog
             )
         }
     }

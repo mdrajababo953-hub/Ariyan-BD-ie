@@ -410,6 +410,33 @@ data class PayloadAnalysis(
 )
 
 object PayloadAnalyzer {
+    fun quickClassify(hexInput: String): PayloadClassification {
+        val cleanHex = HexUtils.sanitizeHex(hexInput)
+        if (cleanHex.length < 2) return PayloadClassification.EMPTY
+        val bytes = HexUtils.hexToBytes(cleanHex)
+        if (bytes.isEmpty()) return PayloadClassification.EMPTY
+
+        val textCandidate = tryReadableUtf8(bytes)
+        if (textCandidate != null) {
+            val trimmed = textCandidate.trim()
+            if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+                (trimmed.startsWith("[") && trimmed.endsWith("]"))
+            ) {
+                return PayloadClassification.JSON
+            }
+            if (isCleanReadableText(textCandidate)) {
+                return PayloadClassification.TEXT
+            }
+        }
+        if (ProtobufWireDecoder.decode(bytes) != null) {
+            return PayloadClassification.PROTOBUF
+        }
+        if (bytes.size >= 16 && bytes.size % 16 == 0) {
+            return PayloadClassification.ENCRYPTED_BLOCK
+        }
+        return PayloadClassification.RAW_BINARY
+    }
+
     fun analyze(hexInput: String): PayloadAnalysis {
         val cleanHex = HexUtils.sanitizeHex(hexInput)
         val bytes = HexUtils.hexToBytes(cleanHex)

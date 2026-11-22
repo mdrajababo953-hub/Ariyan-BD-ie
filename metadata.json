@@ -1,0 +1,6 @@
+{
+  "name": "NetTrace",
+  "description": "Per-app VPN traffic capture, firewall control, session recording, and deep JSON, JWT & Protobuf hex decoder for Android games and apps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

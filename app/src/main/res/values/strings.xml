@@ -1,0 +1,25 @@
+<resources>
+    <string name="app_name">NetTrace</string>
+    <string name="vpn_channel_name">NetTrace Capture Engine</string>
+    <string name="vpn_channel_desc">Displays active per-app traffic capture status</string>
+    <string name="vpn_notif_title">Capturing %1$s</string>
+    <string name="vpn_notif_text">Isolated to %1$s • %2$d packets</string>
+    <string name="nav_capture">Capture</string>
+    <string name="nav_sessions">Sessions</string>
+    <string name="nav_rules">Control</string>
+    <string name="nav_decoder">Decoder</string>
+    <string name="action_start_capture">Start Capture</string>
+    <string name="action_stop_capture">Stop &amp; Save</string>
+    <string name="action_select_target">Select Target App</string>
+    <string name="action_import_raw">Import Raw</string>
+    <string name="action_export_json">Export JSON</string>
+    <string name="action_copy_json">Copy JSON</string>
+    <string name="action_decode">Decode</string>
+    <string name="cd_app_icon">Target application icon</string>
+    <string name="cd_back">Navigate back</string>
+    <string name="cd_clear_search">Clear search</string>
+    <string name="cd_copy">Copy to clipboard</string>
+    <string name="cd_delete">Delete</string>
+    <string name="cd_share">Share JSON</string>
+    <string name="cd_shield_status">VPN capture shield status</string>
+</resources>

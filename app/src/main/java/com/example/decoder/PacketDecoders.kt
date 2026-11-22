@@ -1,0 +1,784 @@
+package com.example.decoder
+
+import android.util.Base64
+import com.example.data.db.CaptureSessionEntity
+import com.example.data.db.CapturedPacketEntity
+import org.json.JSONArray
+import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+
+object HexUtils {
+    fun sanitizeHex(input: String): String {
+        return input
+            .replace("0x", "", ignoreCase = true)
+            .replace(Regex("[^0-9a-fA-F]"), "")
+            .lowercase(Locale.US)
+    }
+
+    fun hexToBytes(hex: String): ByteArray {
+        val clean = sanitizeHex(hex)
+        if (clean.length < 2) return ByteArray(0)
+        val evenLen = clean.length - (clean.length % 2)
+        val out = ByteArray(evenLen / 2)
+        for (i in 0 until evenLen step 2) {
+            out[i / 2] = clean.substring(i, i + 2).toInt(16).toByte()
+        }
+        return out
+    }
+
+    fun bytesToHex(bytes: ByteArray): String {
+        if (bytes.isEmpty()) return ""
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            val v = b.toInt() and 0xFF
+            sb.append(HEX_CHARS[v ushr 4])
+            sb.append(HEX_CHARS[v and 0x0F])
+        }
+        return sb.toString()
+    }
+
+    fun formatHexDump(bytes: ByteArray, maxBytes: Int = 4096): String {
+        if (bytes.isEmpty()) return "<Empty Body>"
+        val limit = minOf(bytes.size, maxBytes)
+        val sb = StringBuilder()
+        var offset = 0
+        while (offset < limit) {
+            sb.append(String.format(Locale.US, "%04X  ", offset))
+            val lineEnd = minOf(offset + 16, limit)
+            for (i in offset until offset + 16) {
+                if (i < lineEnd) {
+                    sb.append(String.format(Locale.US, "%02X ", bytes[i].toInt() and 0xFF))
+                } else {
+                    sb.append("   ")
+                }
+                if (i == offset + 7) sb.append(" ")
+            }
+            sb.append(" |")
+            for (i in offset until lineEnd) {
+                val c = bytes[i].toInt() and 0xFF
+                sb.append(if (c in 32..126) c.toChar() else '.')
+            }
+            sb.append("|\n")
+            offset += 16
+        }
+        if (bytes.size > maxBytes) {
+            sb.append("... (${bytes.size - maxBytes} more bytes truncated)")
+        }
+        return sb.toString().trimEnd()
+    }
+
+    fun toBase64(bytes: ByteArray): String {
+        if (bytes.isEmpty()) return ""
+        return Base64.encodeToString(bytes, Base64.NO_WRAP)
+    }
+
+    private val HEX_CHARS = "0123456789abcdef".toCharArray()
+}
+
+data class JwtDecodeResult(
+    val rawToken: String,
+    val headerJson: String,
+    val payloadJson: String,
+    val signatureHex: String,
+    val claims: Map<String, String>,
+    val expirationText: String?,
+    val isExpired: Boolean?
+)
+
+object JwtDecoder {
+    private val jwtRegex = Regex("eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*")
+
+    fun extractFromHeaders(headersJson: String): JwtDecodeResult? {
+        val match = jwtRegex.find(headersJson) ?: return null
+        return decode(match.value)
+    }
+
+    fun decode(input: String): JwtDecodeResult? {
+        val token = jwtRegex.find(input.trim())?.value ?: input.trim()
+        val parts = token.split(".")
+        if (parts.size < 2) return null
+        return try {
+            val headerBytes = decodeBase64Url(parts[0])
+            val payloadBytes = decodeBase64Url(parts[1])
+            val sigBytes = if (parts.size >= 3 && parts[2].isNotEmpty()) decodeBase64Url(parts[2]) else ByteArray(0)
+
+            val headerObj = JSONObject(String(headerBytes, Charsets.UTF_8))
+            val payloadObj = JSONObject(String(payloadBytes, Charsets.UTF_8))
+
+            val claims = linkedMapOf<String, String>()
+            val keys = payloadObj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                claims[k] = payloadObj.opt(k)?.toString() ?: ""
+            }
+
+            val expSeconds = payloadObj.optLong("exp", -1L)
+            var expText: String? = null
+            var isExpired: Boolean? = null
+            if (expSeconds > 0) {
+                val expMs = expSeconds * 1000L
+                val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.US)
+                expText = fmt.format(Date(expMs))
+                isExpired = expMs < System.currentTimeMillis()
+            }
+
+            JwtDecodeResult(
+                rawToken = token,
+                headerJson = headerObj.toString(2),
+                payloadJson = payloadObj.toString(2),
+                signatureHex = HexUtils.bytesToHex(sigBytes),
+                claims = claims,
+                expirationText = expText,
+                isExpired = isExpired
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun decodeBase64Url(segment: String): ByteArray {
+        return Base64.decode(segment, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+    }
+}
+
+data class ProtobufFieldNode(
+    val fieldNumber: Int,
+    val wireType: Int,
+    val wireTypeName: String,
+    val displayValue: String,
+    val rawDetail: String,
+    val jsonValue: Any,
+    val children: List<ProtobufFieldNode> = emptyList(),
+    val isEmptyMessage: Boolean = false
+)
+
+data class ProtobufDecodeResult(
+    val fields: List<ProtobufFieldNode>,
+    val jsonFormatted: String,
+    val fieldsDictFormatted: String,
+    val byteCount: Int
+)
+
+object ProtobufWireDecoder {
+    fun decode(bytes: ByteArray, depth: Int = 0): ProtobufDecodeResult? {
+        if (bytes.isEmpty() || depth > 8) return null
+        val nodes = mutableListOf<ProtobufFieldNode>()
+        var idx = 0
+
+        while (idx < bytes.size) {
+            val tagRes = readVarint(bytes, idx) ?: return null
+            val tag = tagRes.first
+            idx = tagRes.second
+            if (tag <= 0L) return null
+
+            val fieldNumber = (tag ushr 3).toInt()
+            val wireType = (tag and 0x07).toInt()
+            if (fieldNumber <= 0 || fieldNumber > 536_870_911) return null
+
+            when (wireType) {
+                0 -> { // Varint
+                    val valRes = readVarint(bytes, idx) ?: return null
+                    val raw = valRes.first
+                    idx = valRes.second
+                    val zigZag = (raw ushr 1) xor -(raw and 1L)
+                    val detail = buildString {
+                        append("uint64=").append(raw)
+                        if (zigZag != raw) append(" | sint64=").append(zigZag)
+                        append(" | hex=0x").append(java.lang.Long.toHexString(raw))
+                    }
+                    nodes.add(
+                        ProtobufFieldNode(
+                            fieldNumber = fieldNumber,
+                            wireType = wireType,
+                            wireTypeName = "VARINT",
+                            displayValue = raw.toString(),
+                            rawDetail = detail,
+                            jsonValue = raw
+                        )
+                    )
+                }
+                1 -> { // 64-bit
+                    if (idx + 8 > bytes.size) return null
+                    val buf = ByteBuffer.wrap(bytes, idx, 8).order(ByteOrder.LITTLE_ENDIAN)
+                    val fixed64 = buf.long
+                    val dbl = java.lang.Double.longBitsToDouble(fixed64)
+                    val hexSlice = HexUtils.bytesToHex(bytes.copyOfRange(idx, idx + 8))
+                    idx += 8
+                    val display = if (dbl.isFinite() && kotlin.math.abs(dbl) in 1e-6..1e12) {
+                        "$fixed64 (double: $dbl)"
+                    } else {
+                        fixed64.toString()
+                    }
+                    nodes.add(
+                        ProtobufFieldNode(
+                            fieldNumber = fieldNumber,
+                            wireType = wireType,
+                            wireTypeName = "FIXED64",
+                            displayValue = display,
+                            rawDetail = "hex=$hexSlice",
+                            jsonValue = fixed64
+                        )
+                    )
+                }
+                2 -> { // Length-delimited
+                    val lenRes = readVarint(bytes, idx) ?: return null
+                    val lenLong = lenRes.first
+                    idx = lenRes.second
+                    if (lenLong < 0 || lenLong > (bytes.size - idx)) return null
+                    val len = lenLong.toInt()
+                    val slice = bytes.copyOfRange(idx, idx + len)
+                    idx += len
+
+                    if (len == 0) {
+                        nodes.add(
+                            ProtobufFieldNode(
+                                fieldNumber = fieldNumber,
+                                wireType = wireType,
+                                wireTypeName = "MSG/BYTES (0B)",
+                                displayValue = "{}",
+                                rawDetail = "length=0 (empty message/bytes)",
+                                jsonValue = JSONObject(),
+                                isEmptyMessage = true
+                            )
+                        )
+                    } else {
+                        val printableText = tryDecodeUtf8Text(slice)
+                        val nested = if (printableText == null || slice.size >= 4) {
+                            decode(slice, depth + 1)
+                        } else null
+
+                        // Prefer text if clearly printable ASCII/UTF-8 and not nested with >1 valid fields
+                        if (printableText != null && (nested == null || isMostlyAsciiText(slice))) {
+                            nodes.add(
+                                ProtobufFieldNode(
+                                    fieldNumber = fieldNumber,
+                                    wireType = wireType,
+                                    wireTypeName = "STRING (${len}B)",
+                                    displayValue = "\"$printableText\"",
+                                    rawDetail = "utf8 | hex=${HexUtils.bytesToHex(slice)}",
+                                    jsonValue = printableText
+                                )
+                            )
+                        } else if (nested != null && nested.fields.isNotEmpty()) {
+                            val nestedJson = JSONObject(nested.jsonFormatted)
+                            nodes.add(
+                                ProtobufFieldNode(
+                                    fieldNumber = fieldNumber,
+                                    wireType = wireType,
+                                    wireTypeName = "MESSAGE (${len}B)",
+                                    displayValue = "{ ${nested.fields.size} fields }",
+                                    rawDetail = "nested message | hex=${HexUtils.bytesToHex(slice)}",
+                                    jsonValue = nestedJson,
+                                    children = nested.fields
+                                )
+                            )
+                        } else {
+                            val hex = HexUtils.bytesToHex(slice)
+                            nodes.add(
+                                ProtobufFieldNode(
+                                    fieldNumber = fieldNumber,
+                                    wireType = wireType,
+                                    wireTypeName = "BYTES (${len}B)",
+                                    displayValue = "0x$hex",
+                                    rawDetail = "raw bytes (${len}B)",
+                                    jsonValue = hex
+                                )
+                            )
+                        }
+                    }
+                }
+                5 -> { // 32-bit
+                    if (idx + 4 > bytes.size) return null
+                    val buf = ByteBuffer.wrap(bytes, idx, 4).order(ByteOrder.LITTLE_ENDIAN)
+                    val fixed32 = buf.int
+                    val flt = java.lang.Float.intBitsToFloat(fixed32)
+                    val hexSlice = HexUtils.bytesToHex(bytes.copyOfRange(idx, idx + 4))
+                    idx += 4
+                    val display = if (flt.isFinite() && kotlin.math.abs(flt) in 1e-5f..1e9f) {
+                        "$fixed32 (float: $flt)"
+                    } else {
+                        fixed32.toString()
+                    }
+                    nodes.add(
+                        ProtobufFieldNode(
+                            fieldNumber = fieldNumber,
+                            wireType = wireType,
+                            wireTypeName = "FIXED32",
+                            displayValue = display,
+                            rawDetail = "hex=$hexSlice",
+                            jsonValue = fixed32
+                        )
+                    )
+                }
+                else -> return null
+            }
+        }
+
+        if (nodes.isEmpty()) return null
+        val jsonObj = nodesToJsonObject(nodes)
+        val fieldsDict = ProtobufFieldsFormatter.formatFieldsDict(nodes)
+        return ProtobufDecodeResult(
+            fields = nodes,
+            jsonFormatted = jsonObj.toString(2),
+            fieldsDictFormatted = fieldsDict,
+            byteCount = bytes.size
+        )
+    }
+
+    private fun nodesToJsonObject(nodes: List<ProtobufFieldNode>): JSONObject {
+        val grouped = nodes.groupBy { it.fieldNumber }
+        val obj = JSONObject()
+        for ((fieldNum, items) in grouped) {
+            val key = "field_$fieldNum"
+            if (items.size == 1) {
+                obj.put(key, items.first().jsonValue)
+            } else {
+                val arr = JSONArray()
+                items.forEach { arr.put(it.jsonValue) }
+                obj.put(key, arr)
+            }
+        }
+        return obj
+    }
+
+    private fun readVarint(bytes: ByteArray, start: Int): Pair<Long, Int>? {
+        var result = 0L
+        var shift = 0
+        var i = start
+        while (i < bytes.size && shift <= 63) {
+            val b = bytes[i].toInt() and 0xFF
+            result = result or ((b.toLong() and 0x7FL) shl shift)
+            i++
+            if ((b and 0x80) == 0) {
+                return result to i
+            }
+            shift += 7
+        }
+        return null
+    }
+
+    private fun tryDecodeUtf8Text(slice: ByteArray): String? {
+        if (slice.isEmpty()) return null
+        val str = try {
+            String(slice, Charsets.UTF_8)
+        } catch (_: Exception) {
+            return null
+        }
+        if (str.contains('\uFFFD')) return null
+        val valid = str.all { ch ->
+            !ch.isISOControl() || ch == '\n' || ch == '\r' || ch == '\t'
+        }
+        return if (valid) str else null
+    }
+
+    private fun isMostlyAsciiText(slice: ByteArray): Boolean {
+        if (slice.isEmpty()) return false
+        val asciiPrintable = slice.count { b ->
+            val v = b.toInt() and 0xFF
+            v in 32..126 || v == 10 || v == 13 || v == 9
+        }
+        return asciiPrintable == slice.size && slice.any { (it.toInt() and 0xFF) in 65..122 }
+    }
+}
+
+enum class PayloadClassification {
+    EMPTY,
+    PROTOBUF,
+    JSON,
+    TEXT,
+    ENCRYPTED_BLOCK,
+    RAW_BINARY
+}
+
+data class PayloadAnalysis(
+    val hex: String,
+    val byteCount: Int,
+    val classification: PayloadClassification,
+    val summary: String,
+    val protobuf: ProtobufDecodeResult? = null,
+    val formattedJson: String? = null,
+    val utf8Text: String? = null,
+    val hexDump: String = "",
+    val base64: String = ""
+)
+
+object PayloadAnalyzer {
+    fun analyze(hexInput: String): PayloadAnalysis {
+        val cleanHex = HexUtils.sanitizeHex(hexInput)
+        val bytes = HexUtils.hexToBytes(cleanHex)
+        if (bytes.isEmpty()) {
+            return PayloadAnalysis(
+                hex = "",
+                byteCount = 0,
+                classification = PayloadClassification.EMPTY,
+                summary = "Empty body (0 bytes)",
+                hexDump = "<Empty Body>"
+            )
+        }
+
+        val hexDump = HexUtils.formatHexDump(bytes)
+        val base64 = HexUtils.toBase64(bytes)
+
+        // 1. Check UTF-8 JSON or readable text
+        val textCandidate = tryReadableUtf8(bytes)
+        if (textCandidate != null) {
+            val trimmed = textCandidate.trim()
+            if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+                (trimmed.startsWith("[") && trimmed.endsWith("]"))
+            ) {
+                val pretty = tryFormatJson(trimmed)
+                if (pretty != null) {
+                    return PayloadAnalysis(
+                        hex = cleanHex,
+                        byteCount = bytes.size,
+                        classification = PayloadClassification.JSON,
+                        summary = "UTF-8 JSON (${bytes.size} bytes)",
+                        formattedJson = pretty,
+                        utf8Text = textCandidate,
+                        hexDump = hexDump,
+                        base64 = base64
+                    )
+                }
+            }
+            if (isCleanReadableText(textCandidate)) {
+                return PayloadAnalysis(
+                    hex = cleanHex,
+                    byteCount = bytes.size,
+                    classification = PayloadClassification.TEXT,
+                    summary = "Plaintext / Form Data (${bytes.size} bytes)",
+                    utf8Text = textCandidate,
+                    hexDump = hexDump,
+                    base64 = base64
+                )
+            }
+        }
+
+        // 2. Check Protobuf wire format
+        val proto = ProtobufWireDecoder.decode(bytes)
+        if (proto != null) {
+            return PayloadAnalysis(
+                hex = cleanHex,
+                byteCount = bytes.size,
+                classification = PayloadClassification.PROTOBUF,
+                summary = "Protobuf Wire Format • ${proto.fields.size} top-level fields (${bytes.size} bytes)",
+                protobuf = proto,
+                formattedJson = proto.jsonFormatted,
+                hexDump = hexDump,
+                base64 = base64
+            )
+        }
+
+        // 3. Check 16-byte AES block alignment
+        if (bytes.size >= 16 && bytes.size % 16 == 0) {
+            return PayloadAnalysis(
+                hex = cleanHex,
+                byteCount = bytes.size,
+                classification = PayloadClassification.ENCRYPTED_BLOCK,
+                summary = "16B-aligned binary block (${bytes.size} bytes) — likely AES-CBC/ECB encrypted",
+                hexDump = hexDump,
+                base64 = base64
+            )
+        }
+
+        return PayloadAnalysis(
+            hex = cleanHex,
+            byteCount = bytes.size,
+            classification = PayloadClassification.RAW_BINARY,
+            summary = "Raw binary payload (${bytes.size} bytes)",
+            hexDump = hexDump,
+            base64 = base64
+        )
+    }
+
+    private fun tryReadableUtf8(bytes: ByteArray): String? {
+        return try {
+            val s = String(bytes, Charsets.UTF_8)
+            if (s.contains('\uFFFD')) null else s
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun isCleanReadableText(text: String): Boolean {
+        if (text.isEmpty()) return false
+        val printable = text.count { !it.isISOControl() || it == '\n' || it == '\r' || it == '\t' }
+        return printable == text.length
+    }
+
+    private fun tryFormatJson(raw: String): String? {
+        return try {
+            if (raw.startsWith("{")) JSONObject(raw).toString(2)
+            else JSONArray(raw).toString(2)
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+enum class DecryptMode(val label: String) {
+    AES_CBC_PKCS5("AES-CBC (PKCS5)"),
+    AES_CBC_NOPAD("AES-CBC (Raw)"),
+    AES_ECB_PKCS5("AES-ECB (PKCS5)"),
+    XOR_KEY("Repeating XOR")
+}
+
+object PayloadDecryptor {
+    fun decrypt(
+        payloadHex: String,
+        keyInput: String,
+        ivInput: String,
+        keyIsHex: Boolean,
+        mode: DecryptMode
+    ): Result<PayloadAnalysis> {
+        return try {
+            val cipherBytes = HexUtils.hexToBytes(payloadHex)
+            require(cipherBytes.isNotEmpty()) { "Payload hex is empty." }
+
+            val keyBytes = if (keyIsHex) HexUtils.hexToBytes(keyInput) else keyInput.toByteArray(Charsets.UTF_8)
+            require(keyBytes.isNotEmpty()) { "Key cannot be empty." }
+
+            val plainBytes = when (mode) {
+                DecryptMode.XOR_KEY -> {
+                    ByteArray(cipherBytes.size) { idx ->
+                        (cipherBytes[idx].toInt() xor keyBytes[idx % keyBytes.size].toInt()).toByte()
+                    }
+                }
+                DecryptMode.AES_ECB_PKCS5 -> {
+                    require(keyBytes.size in listOf(16, 24, 32)) { "AES key must be 16, 24, or 32 bytes (got ${keyBytes.size})." }
+                    val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
+                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"))
+                    cipher.doFinal(cipherBytes)
+                }
+                DecryptMode.AES_CBC_PKCS5, DecryptMode.AES_CBC_NOPAD -> {
+                    require(keyBytes.size in listOf(16, 24, 32)) { "AES key must be 16, 24, or 32 bytes (got ${keyBytes.size})." }
+                    val ivBytes = if (ivInput.isBlank()) {
+                        ByteArray(16)
+                    } else if (keyIsHex) {
+                        HexUtils.hexToBytes(ivInput)
+                    } else {
+                        ivInput.toByteArray(Charsets.UTF_8)
+                    }
+                    require(ivBytes.size == 16) { "AES-CBC IV must be 16 bytes (got ${ivBytes.size})." }
+                    val transformation = if (mode == DecryptMode.AES_CBC_PKCS5) {
+                        "AES/CBC/PKCS5Padding"
+                    } else {
+                        "AES/CBC/NoPadding"
+                    }
+                    val cipher = Cipher.getInstance(transformation)
+                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(ivBytes))
+                    cipher.doFinal(cipherBytes)
+                }
+            }
+
+            Result.success(PayloadAnalyzer.analyze(HexUtils.bytesToHex(plainBytes)))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+}
+
+object PacketJsonSerializer {
+    fun parseHeadersMap(headersJson: String): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        try {
+            val obj = JSONObject(headersJson)
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                result[k] = obj.optString(k)
+            }
+        } catch (_: Exception) {
+        }
+        return result
+    }
+
+    fun packetToJsonObject(packet: CapturedPacketEntity): JSONObject {
+        val reqHeadersObj = try {
+            JSONObject(packet.requestHeadersJson)
+        } catch (_: Exception) {
+            JSONObject()
+        }
+        val respHeadersObj = try {
+            JSONObject(packet.responseHeadersJson)
+        } catch (_: Exception) {
+            JSONObject()
+        }
+        val jwt = JwtDecoder.extractFromHeaders(packet.requestHeadersJson)
+        val reqAnalysis = PayloadAnalyzer.analyze(packet.requestBodyHex)
+        val respAnalysis = PayloadAnalyzer.analyze(packet.responseBodyHex)
+
+        return JSONObject().apply {
+            put("id", packet.id)
+            put("timestamp", packet.timestamp)
+            put("protocol", packet.protocol)
+            put("method", packet.method)
+            put("url", packet.url)
+            put("host", packet.host)
+            put("path", packet.path)
+            put("port", packet.port)
+            put("statusCode", packet.statusCode ?: JSONObject.NULL)
+            put("isBlocked", packet.isBlocked)
+            if (packet.blockReason != null) put("blockReason", packet.blockReason)
+            put("durationMs", packet.durationMs)
+            put("requestHeaders", reqHeadersObj)
+            if (jwt != null) {
+                put("decodedJwt", JSONObject().apply {
+                    put("header", JSONObject(jwt.headerJson))
+                    put("payload", JSONObject(jwt.payloadJson))
+                    if (jwt.expirationText != null) put("expiresAt", jwt.expirationText)
+                })
+            }
+            put("requestBody", JSONObject().apply {
+                put("classification", reqAnalysis.classification.name)
+                put("byteCount", reqAnalysis.byteCount)
+                put("hex", packet.requestBodyHex)
+                reqAnalysis.protobuf?.let { put("decodedProtobuf", JSONObject(it.jsonFormatted)) }
+                reqAnalysis.utf8Text?.let { put("text", it) }
+            })
+            put("responseHeaders", respHeadersObj)
+            put("responseBody", JSONObject().apply {
+                put("classification", respAnalysis.classification.name)
+                put("byteCount", respAnalysis.byteCount)
+                put("hex", packet.responseBodyHex)
+                respAnalysis.protobuf?.let { put("decodedProtobuf", JSONObject(it.jsonFormatted)) }
+                respAnalysis.utf8Text?.let { put("text", it) }
+            })
+        }
+    }
+
+    fun packetToFormattedJson(packet: CapturedPacketEntity): String {
+        return packetToJsonObject(packet).toString(2)
+    }
+
+    fun sessionToFormattedJson(
+        session: CaptureSessionEntity,
+        packets: List<CapturedPacketEntity>
+    ): String {
+        val root = JSONObject().apply {
+            put("session", JSONObject().apply {
+                put("id", session.id)
+                put("title", session.title)
+                put("targetAppName", session.targetAppName)
+                put("targetPackageName", session.targetPackageName)
+                put("startedAt", session.startedAt)
+                put("endedAt", session.endedAt ?: JSONObject.NULL)
+                put("packetCount", packets.size)
+                put("blockedCount", session.blockedCount)
+                put("totalBytes", session.totalBytes)
+            })
+            val arr = JSONArray()
+            packets.forEach { arr.put(packetToJsonObject(it)) }
+            put("packets", arr)
+        }
+        return root.toString(2)
+    }
+}
+
+object ProtobufFieldsFormatter {
+
+    fun formatFieldsDict(nodes: List<ProtobufFieldNode>): String {
+        return buildString {
+            append("fields = ")
+            append(formatObject(nodes, indentLevel = 0))
+        }
+    }
+
+    fun formatAsyncSnippet(
+        nodes: List<ProtobufFieldNode>,
+        endpointOrPath: String,
+        packetHeaderHex: String = "0E15"
+    ): String {
+        val cleanName = endpointOrPath
+            .substringAfterLast("/")
+            .replace(Regex("[^A-Za-z0-9_]"), "")
+            .ifBlank { "Packet" }
+        val fnName = if (cleanName.startsWith("Send", ignoreCase = true)) cleanName else "Send$cleanName"
+        val body = formatObject(nodes, indentLevel = 1)
+        return buildString {
+            appendLine("async def $fnName(key, iv):")
+            appendLine("    fields = $body")
+            append("    return await GeneRaTePk((await CrEaTe_ProTo(fields)).hex(), '$packetHeaderHex', key, iv)")
+        }
+    }
+
+    private fun formatObject(nodes: List<ProtobufFieldNode>, indentLevel: Int): String {
+        if (nodes.isEmpty()) return "{}"
+        val pad = "    ".repeat(indentLevel + 1)
+        val closePad = "    ".repeat(indentLevel)
+        val grouped = nodes.groupBy { it.fieldNumber }
+        return buildString {
+            appendLine("{")
+            val entries = grouped.entries.toList()
+            entries.forEachIndexed { idx, (fieldNum, items) ->
+                val valueStr = if (items.size == 1) {
+                    formatSingleValue(items.first(), indentLevel + 1)
+                } else {
+                    formatRepeatedList(items, indentLevel + 1)
+                }
+                val comma = if (idx < entries.lastIndex) "," else ","
+                appendLine("$pad$fieldNum: $valueStr$comma")
+            }
+            append("$closePad}")
+        }
+    }
+
+    private fun formatRepeatedList(items: List<ProtobufFieldNode>, indentLevel: Int): String {
+        val pad = "    ".repeat(indentLevel + 1)
+        val closePad = "    ".repeat(indentLevel)
+        return buildString {
+            appendLine("[")
+            items.forEachIndexed { idx, item ->
+                val v = formatSingleValue(item, indentLevel + 1)
+                val comma = if (idx < items.lastIndex) "," else ","
+                appendLine("$pad$v$comma")
+            }
+            append("$closePad]")
+        }
+    }
+
+    private fun formatSingleValue(node: ProtobufFieldNode, indentLevel: Int): String {
+        return when {
+            node.isEmptyMessage -> "{}"
+            node.children.isNotEmpty() -> formatObject(node.children, indentLevel)
+            node.wireTypeName.startsWith("STRING") -> {
+                val raw = node.jsonValue.toString()
+                    .replace("\\", "\\\\")
+                    .replace("\"", "\\\"")
+                "\"$raw\""
+            }
+            node.wireTypeName.startsWith("BYTES") -> {
+                "bytes.fromhex(\"${node.jsonValue}\")"
+            }
+            else -> node.jsonValue.toString()
+        }
+    }
+}
+
+object PacketRawFormatter {
+    fun formatPacket(packet: CapturedPacketEntity): String {
+        val headers = PacketJsonSerializer.parseHeadersMap(packet.requestHeadersJson)
+        return buildString {
+            appendLine("Method & URL : ${packet.method} ${packet.url}")
+            appendLine()
+            appendLine("Headers :")
+            if (headers.isEmpty()) {
+                appendLine("<None>")
+            } else {
+                headers.forEach { (k, v) -> appendLine("$k: $v") }
+            }
+            appendLine()
+            appendLine("Request body Hex:")
+            appendLine(packet.requestBodyHex.ifBlank { "<Empty Body>" })
+            appendLine()
+            appendLine("Response body Hex:")
+            append(packet.responseBodyHex.ifBlank { "<Empty Body>" })
+        }
+    }
+}

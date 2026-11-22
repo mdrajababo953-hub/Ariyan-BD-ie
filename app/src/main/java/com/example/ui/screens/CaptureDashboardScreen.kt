@@ -616,10 +616,12 @@ private fun TargetIsolationHeroCard(
                         Text(
                             text = when {
                                 !httpsMitmEnabled -> "Passthrough mode: TLS SNI captured without decrypting HTTPS URLs."
+                                vpnState.isRunning && !vpnState.caTrusted ->
+                                    "CA not trusted yet — passthrough active so game stays online. Install & trust NetTrace CA to decrypt HTTPS URLs."
                                 vpnState.pinningBypassCount > 0 ->
                                     "${vpnState.pinningBypassCount} host(s) enforced SSL Pinning & auto-bypassed to keep traffic alive."
                                 else ->
-                                    "Install NetTrace CA (User Cert) to capture individual HTTPS endpoints like /UpdateSocialBasicInfo."
+                                    "Install & trust NetTrace CA (User Cert) to decrypt HTTPS endpoints like /UpdateSocialBasicInfo."
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant

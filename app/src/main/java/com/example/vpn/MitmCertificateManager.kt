@@ -49,6 +49,23 @@ class MitmCertificateManager(private val context: Context) {
 
     fun isCaReady(): Boolean = caCertFile.exists() && caKeyFile.exists()
 
+    fun isCaTrustedByAndroid(): Boolean {
+        return runCatching {
+            val ks = KeyStore.getInstance("AndroidCAStore")
+            ks.load(null, null)
+            val aliases = ks.aliases()
+            while (aliases.hasMoreElements()) {
+                val alias = aliases.nextElement()
+                val cert = ks.getCertificate(alias) as? X509Certificate ?: continue
+                val subject = cert.subjectX500Principal?.name.orEmpty()
+                if (subject.contains("NetTrace Local Proxy CA", ignoreCase = true)) {
+                    return@runCatching true
+                }
+            }
+            false
+        }.getOrDefault(false)
+    }
+
     fun ensureCa(): Pair<X509Certificate, KeyPair> {
         val existingCert = caCert
         val existingKey = caKeyPair

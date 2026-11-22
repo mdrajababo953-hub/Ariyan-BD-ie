@@ -195,12 +195,20 @@ class PacketDecodersTest {
             requestBodyHex = "08f4f3c8cf3d",
             responseBodyHex = ""
         )
-        val all = listOf(httpsPkt, udpPkt)
+        val tlsHandshakePkt = httpsPkt.copy(
+            id = 3,
+            method = "TLS",
+            url = "https://clientbp.ggpolarbear.com/Passthrough",
+            path = "/Passthrough",
+            requestBodyHex = "160303007a02000076",
+            responseBodyHex = ""
+        )
+        val all = listOf(httpsPkt, udpPkt, tlsHandshakePkt)
 
         assertEquals(1, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.HTTP_HTTPS).size)
         assertEquals(1, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.UDP_DNS).size)
-        assertEquals(1, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.TCP).size)
-        assertEquals(2, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.ALL).size)
+        assertEquals(2, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.TCP).size)
+        assertEquals(3, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.ALL).size)
 
         val result = com.example.decoder.BatchDecodeExporter.decodeAndSaveToAryanFolder(
             context = ctx,
@@ -213,8 +221,60 @@ class PacketDecodersTest {
         val res = result.getOrThrow()
         assertEquals(1, res.decodedCount)
         assertTrue(res.displayPath.contains("Aryan"))
-        assertTrue(res.jsonContent.contains("\"sourceLink\": \"https:\\/\\/clientbp.ggpolarbear.com\\/GetLikedRecord\"") ||
-            res.jsonContent.contains("clientbp.ggpolarbear.com/GetLikedRecord"))
-        assertTrue(res.jsonContent.contains("\"decodedProtobuf\""))
+
+        val arr = org.json.JSONArray(res.jsonContent)
+        assertEquals(1, arr.length())
+        val item = arr.getJSONObject(0)
+        assertEquals(setOf("request", "response"), item.keys().asSequence().toSet())
+        val reqObj = item.getJSONObject("request")
+        val respObj = item.getJSONObject("response")
+        assertEquals(setOf("hex", "decoded"), reqObj.keys().asSequence().toSet())
+        assertEquals(setOf("hex", "decoded"), respObj.keys().asSequence().toSet())
+        assertEquals("1a725b2c56ec52ba7d09623454c0a003", reqObj.getString("hex"))
+        assertEquals("0a00", respObj.getString("hex"))
+        assertTrue(!res.jsonContent.contains("0000  "))
+        assertTrue(!res.jsonContent.contains("sourceLink"))
+        assertTrue(!res.jsonContent.contains("requestHeaders"))
+    }
+
+    @Test
+    fun `formatHexDump and packetToFormattedJson emit clean hex and strictly request response json`() {
+        val hexDump = HexUtils.formatHexDump(HexUtils.hexToBytes("160303007a"))
+        assertEquals("160303007a", hexDump)
+        assertTrue(!hexDump.contains("|"))
+        assertTrue(!hexDump.contains("0000"))
+
+        val pkt = com.example.data.db.CapturedPacketEntity(
+            id = 10,
+            sessionId = 1,
+            timestamp = 2000L,
+            method = "POST",
+            url = "https://clientbp.ggpolarbear.com/GetLikedRecord",
+            host = "clientbp.ggpolarbear.com",
+            path = "/GetLikedRecord",
+            port = 443,
+            protocol = "HTTPS",
+            statusCode = 200,
+            requestHeadersJson = "{\"Authorization\":\"Bearer abc\"}",
+            requestBodyHex = "1a725b2c56ec52ba7d09623454c0a003",
+            responseHeadersJson = "{\"Server\":\"nginx\"}",
+            responseBodyHex = "0a00",
+            durationMs = 12,
+            bytesTx = 16,
+            bytesRx = 2,
+            isBlocked = false,
+            blockReason = null
+        )
+        val obj = org.json.JSONObject(com.example.decoder.PacketJsonSerializer.packetToFormattedJson(pkt))
+        assertEquals(setOf("request", "response"), obj.keys().asSequence().toSet())
+        assertEquals("1a725b2c56ec52ba7d09623454c0a003", obj.getJSONObject("request").getString("hex"))
+        assertTrue(obj.getJSONObject("request").isNull("decoded"))
+        assertEquals("0a00", obj.getJSONObject("response").getString("hex"))
+        assertTrue(obj.getJSONObject("response").getJSONObject("decoded").has("field_1"))
+
+        val protoReqPkt = pkt.copy(requestBodyHex = "08f4f3c8cf3d1026")
+        val protoObj = org.json.JSONObject(com.example.decoder.PacketJsonSerializer.packetToFormattedJson(protoReqPkt))
+        assertEquals(16541432308L, protoObj.getJSONObject("request").getJSONObject("decoded").getLong("field_1"))
+        assertEquals(38L, protoObj.getJSONObject("request").getJSONObject("decoded").getLong("field_2"))
     }
 }

@@ -44,34 +44,16 @@ object HexUtils {
         return sb.toString()
     }
 
-    fun formatHexDump(bytes: ByteArray, maxBytes: Int = 4096): String {
+    fun formatHexDump(bytes: ByteArray, maxBytes: Int = 8192): String {
         if (bytes.isEmpty()) return "<Empty Body>"
         val limit = minOf(bytes.size, maxBytes)
-        val sb = StringBuilder()
-        var offset = 0
-        while (offset < limit) {
-            sb.append(String.format(Locale.US, "%04X  ", offset))
-            val lineEnd = minOf(offset + 16, limit)
-            for (i in offset until offset + 16) {
-                if (i < lineEnd) {
-                    sb.append(String.format(Locale.US, "%02X ", bytes[i].toInt() and 0xFF))
-                } else {
-                    sb.append("   ")
-                }
-                if (i == offset + 7) sb.append(" ")
-            }
-            sb.append(" |")
-            for (i in offset until lineEnd) {
-                val c = bytes[i].toInt() and 0xFF
-                sb.append(if (c in 32..126) c.toChar() else '.')
-            }
-            sb.append("|\n")
-            offset += 16
+        val slice = if (limit == bytes.size) bytes else bytes.copyOf(limit)
+        val cleanHex = bytesToHex(slice)
+        return if (bytes.size > maxBytes) {
+            "$cleanHex\n... (${bytes.size - maxBytes} more bytes truncated)"
+        } else {
+            cleanHex
         }
-        if (bytes.size > maxBytes) {
-            sb.append("... (${bytes.size - maxBytes} more bytes truncated)")
-        }
-        return sb.toString().trimEnd()
     }
 
     fun toBase64(bytes: ByteArray): String {
@@ -626,57 +608,30 @@ object PacketJsonSerializer {
         return result
     }
 
-    fun packetToJsonObject(packet: CapturedPacketEntity): JSONObject {
-        val reqHeadersObj = try {
-            JSONObject(packet.requestHeadersJson)
-        } catch (_: Exception) {
-            JSONObject()
-        }
-        val respHeadersObj = try {
-            JSONObject(packet.responseHeadersJson)
-        } catch (_: Exception) {
-            JSONObject()
-        }
-        val jwt = JwtDecoder.extractFromHeaders(packet.requestHeadersJson)
-        val reqAnalysis = PayloadAnalyzer.analyze(packet.requestBodyHex)
-        val respAnalysis = PayloadAnalyzer.analyze(packet.responseBodyHex)
-
-        return JSONObject().apply {
-            put("id", packet.id)
-            put("timestamp", packet.timestamp)
-            put("protocol", packet.protocol)
-            put("method", packet.method)
-            put("url", packet.url)
-            put("host", packet.host)
-            put("path", packet.path)
-            put("port", packet.port)
-            put("statusCode", packet.statusCode ?: JSONObject.NULL)
-            put("isBlocked", packet.isBlocked)
-            if (packet.blockReason != null) put("blockReason", packet.blockReason)
-            put("durationMs", packet.durationMs)
-            put("requestHeaders", reqHeadersObj)
-            if (jwt != null) {
-                put("decodedJwt", JSONObject().apply {
-                    put("header", JSONObject(jwt.headerJson))
-                    put("payload", JSONObject(jwt.payloadJson))
-                    if (jwt.expirationText != null) put("expiresAt", jwt.expirationText)
-                })
+    fun buildPayloadJsonObject(hex: String): JSONObject {
+        val cleanHex = HexUtils.sanitizeHex(hex)
+        val analysis = PayloadAnalyzer.analyze(cleanHex)
+        val decodedValue: Any = when {
+            analysis.protobuf != null -> JSONObject(analysis.protobuf.jsonFormatted)
+            analysis.formattedJson != null -> {
+                runCatching {
+                    val trimmed = analysis.formattedJson.trim()
+                    if (trimmed.startsWith("[")) JSONArray(trimmed) else JSONObject(trimmed)
+                }.getOrElse { analysis.formattedJson }
             }
-            put("requestBody", JSONObject().apply {
-                put("classification", reqAnalysis.classification.name)
-                put("byteCount", reqAnalysis.byteCount)
-                put("hex", packet.requestBodyHex)
-                reqAnalysis.protobuf?.let { put("decodedProtobuf", JSONObject(it.jsonFormatted)) }
-                reqAnalysis.utf8Text?.let { put("text", it) }
-            })
-            put("responseHeaders", respHeadersObj)
-            put("responseBody", JSONObject().apply {
-                put("classification", respAnalysis.classification.name)
-                put("byteCount", respAnalysis.byteCount)
-                put("hex", packet.responseBodyHex)
-                respAnalysis.protobuf?.let { put("decodedProtobuf", JSONObject(it.jsonFormatted)) }
-                respAnalysis.utf8Text?.let { put("text", it) }
-            })
+            analysis.utf8Text != null -> analysis.utf8Text
+            else -> JSONObject.NULL
+        }
+        return JSONObject().apply {
+            put("hex", cleanHex)
+            put("decoded", decodedValue)
+        }
+    }
+
+    fun packetToJsonObject(packet: CapturedPacketEntity): JSONObject {
+        return JSONObject().apply {
+            put("request", buildPayloadJsonObject(packet.requestBodyHex))
+            put("response", buildPayloadJsonObject(packet.responseBodyHex))
         }
     }
 
@@ -688,23 +643,9 @@ object PacketJsonSerializer {
         session: CaptureSessionEntity,
         packets: List<CapturedPacketEntity>
     ): String {
-        val root = JSONObject().apply {
-            put("session", JSONObject().apply {
-                put("id", session.id)
-                put("title", session.title)
-                put("targetAppName", session.targetAppName)
-                put("targetPackageName", session.targetPackageName)
-                put("startedAt", session.startedAt)
-                put("endedAt", session.endedAt ?: JSONObject.NULL)
-                put("packetCount", packets.size)
-                put("blockedCount", session.blockedCount)
-                put("totalBytes", session.totalBytes)
-            })
-            val arr = JSONArray()
-            packets.forEach { arr.put(packetToJsonObject(it)) }
-            put("packets", arr)
-        }
-        return root.toString(2)
+        val arr = JSONArray()
+        packets.forEach { arr.put(packetToJsonObject(it)) }
+        return arr.toString(2)
     }
 }
 

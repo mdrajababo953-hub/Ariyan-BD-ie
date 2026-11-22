@@ -233,8 +233,8 @@ fun DecoderLabScreen(
                             if (analysis.protobuf == null && analysis.formattedJson == null) {
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Text(
-                                    text = analysis.hexDump,
-                                    style = MaterialTheme.typography.labelMedium,
+                                    text = analysis.utf8Text ?: analysis.hex.ifBlank { "<Empty Body>" },
+                                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
@@ -359,8 +359,8 @@ fun DecoderLabScreen(
                                         )
                                     }
                                 } ?: Text(
-                                    text = dec.formattedJson ?: dec.utf8Text ?: dec.hexDump,
-                                    style = MaterialTheme.typography.labelMedium
+                                    text = dec.formattedJson ?: dec.utf8Text ?: dec.hex.ifBlank { "<Empty Body>" },
+                                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily)
                                 )
                             }
                         }

@@ -366,4 +366,105 @@ class VpnMitmTest {
         assertEquals(200, capturedStatuses[0].first)
         assertEquals("0a00", capturedStatuses[1].second)
     }
+
+    @Test
+    fun `http stream proxy relays server-first binary stream and respects half-close without dropping response`() = runTest {
+        val serverSock = java.net.ServerSocket(0, 4, java.net.InetAddress.getLoopbackAddress())
+        val bridgeSock = java.net.ServerSocket(0, 4, java.net.InetAddress.getLoopbackAddress())
+
+        // Upstream server sends greeting immediately before client sends anything,
+        // then waits for client request + EOF, then sends final reply.
+        val upstreamJob = launch(Dispatchers.IO) {
+            val conn = serverSock.accept()
+            conn.use {
+                val out = it.getOutputStream()
+                val inp = it.getInputStream()
+                out.write(byteArrayOf(0x01, 0x02, 0x03, 0x04))
+                out.flush()
+
+                val req = inp.readBytes()
+                assertTrue(req.contentEquals(byteArrayOf(0x0A, 0x0B)))
+
+                out.write(byteArrayOf(0x05, 0x06, 0x07))
+                out.flush()
+            }
+        }
+
+        val proxyJob = launch(Dispatchers.IO) {
+            val clientConn = bridgeSock.accept()
+            val upstream = java.net.Socket(java.net.InetAddress.getLoopbackAddress(), serverSock.localPort)
+            try {
+                HttpStreamProxy.relayStream(
+                    scope = this,
+                    clientIn = clientConn.getInputStream(),
+                    clientOut = clientConn.getOutputStream(),
+                    serverIn = upstream.getInputStream(),
+                    serverOut = upstream.getOutputStream(),
+                    initialClientBytes = ByteArray(0),
+                    isHttps = false,
+                    defaultHost = "127.0.0.1",
+                    port = serverSock.localPort,
+                    callbacks = object : HttpCaptureCallbacks {
+                        override fun onHttpRequest(meta: CapturedHttpRequestMeta) = Unit
+                        override fun onHttpResponse(
+                            meta: CapturedHttpRequestMeta,
+                            statusCode: Int?,
+                            responseHeadersJson: String,
+                            responseBodyHex: String,
+                            bytesRx: Int,
+                            durationMs: Long
+                        ) = Unit
+                        override fun onRawTunnelBytes(
+                            isHttps: Boolean,
+                            host: String,
+                            port: Int,
+                            reqBytes: ByteArray?,
+                            respBytes: ByteArray?
+                        ) = Unit
+                        override fun onBytesTransferred(bytes: Int) = Unit
+                    },
+                    skipHttpPeek = true,
+                    onClientEof = { runCatching { upstream.shutdownOutput() } },
+                    onServerEof = { runCatching { clientConn.shutdownOutput() } }
+                )
+            } finally {
+                runCatching { upstream.close() }
+                runCatching { clientConn.close() }
+            }
+        }
+
+        val appReply = ByteArrayOutputStream()
+        val clientJob = launch(Dispatchers.IO) {
+            val appSock = java.net.Socket(java.net.InetAddress.getLoopbackAddress(), bridgeSock.localPort)
+            appSock.use { s ->
+                val inp = s.getInputStream()
+                val out = s.getOutputStream()
+                val first4 = ByteArray(4)
+                var readCount = 0
+                while (readCount < 4) {
+                    val n = inp.read(first4, readCount, 4 - readCount)
+                    if (n <= 0) break
+                    readCount += n
+                }
+                assertEquals(4, readCount)
+                appReply.write(first4, 0, readCount)
+
+                // Client sends payload and half-closes output while expecting remaining server bytes
+                out.write(byteArrayOf(0x0A, 0x0B))
+                out.flush()
+                s.shutdownOutput()
+
+                val rest = inp.readBytes()
+                appReply.write(rest)
+            }
+        }
+
+        clientJob.join()
+        proxyJob.join()
+        upstreamJob.join()
+        bridgeSock.close()
+        serverSock.close()
+
+        assertEquals("01020304050607", HexUtils.bytesToHex(appReply.toByteArray()))
+    }
 }

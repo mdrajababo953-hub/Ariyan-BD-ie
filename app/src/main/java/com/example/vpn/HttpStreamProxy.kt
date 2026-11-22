@@ -74,7 +74,10 @@ object HttpStreamProxy {
         isHttps: Boolean,
         defaultHost: String,
         port: Int,
-        callbacks: HttpCaptureCallbacks
+        callbacks: HttpCaptureCallbacks,
+        skipHttpPeek: Boolean = false,
+        onClientEof: (() -> Unit)? = null,
+        onServerEof: (() -> Unit)? = null
     ) {
         val scheme = if (isHttps) "https" else "http"
         val protocolLabel = if (isHttps) "HTTPS" else "HTTP"
@@ -85,7 +88,24 @@ object HttpStreamProxy {
             clientIn
         }
 
-        // Peek first line bytes up to 32 bytes to decide HTTP/1.x vs Raw Binary TCP/TLS
+        if (skipHttpPeek) {
+            relayRawBinary(
+                scope = scope,
+                clientIn = prefixedClientIn,
+                clientOut = clientOut,
+                serverIn = serverIn,
+                serverOut = serverOut,
+                isHttps = isHttps,
+                host = defaultHost,
+                port = port,
+                callbacks = callbacks,
+                onClientEof = onClientEof,
+                onServerEof = onServerEof
+            )
+            return
+        }
+
+        // Peek first line bytes up to 16 bytes to decide HTTP/1.x vs Raw Binary TCP/TLS
         val peekBuf = ByteArray(16)
         val bufferedClient = java.io.BufferedInputStream(prefixedClientIn, 16384)
         bufferedClient.mark(16)
@@ -106,7 +126,9 @@ object HttpStreamProxy {
                 isHttps = isHttps,
                 host = defaultHost,
                 port = port,
-                callbacks = callbacks
+                callbacks = callbacks,
+                onClientEof = onClientEof,
+                onServerEof = onServerEof
             )
             return
         }
@@ -175,6 +197,7 @@ object HttpStreamProxy {
             } catch (_: Exception) {
             } finally {
                 runCatching { clientOut.flush() }
+                runCatching { onServerEof?.invoke() }
             }
         }
 
@@ -230,7 +253,8 @@ object HttpStreamProxy {
         } catch (_: Exception) {
         } finally {
             pendingQueue.close()
-            runCatching { serverOut.close() }
+            runCatching { serverOut.flush() }
+            runCatching { onClientEof?.invoke() }
             responseJob.join()
         }
     }
@@ -244,7 +268,9 @@ object HttpStreamProxy {
         isHttps: Boolean,
         host: String,
         port: Int,
-        callbacks: HttpCaptureCallbacks
+        callbacks: HttpCaptureCallbacks,
+        onClientEof: (() -> Unit)? = null,
+        onServerEof: (() -> Unit)? = null
     ) {
         val respJob = scope.launch(Dispatchers.IO) {
             val buf = ByteArray(8192)
@@ -259,6 +285,9 @@ object HttpStreamProxy {
                     callbacks.onRawTunnelBytes(isHttps, host, port, reqBytes = null, respBytes = slice)
                 }
             } catch (_: Exception) {
+            } finally {
+                runCatching { clientOut.flush() }
+                runCatching { onServerEof?.invoke() }
             }
         }
         val buf = ByteArray(8192)
@@ -274,7 +303,8 @@ object HttpStreamProxy {
             }
         } catch (_: Exception) {
         } finally {
-            runCatching { serverOut.close() }
+            runCatching { serverOut.flush() }
+            runCatching { onClientEof?.invoke() }
             respJob.join()
         }
     }

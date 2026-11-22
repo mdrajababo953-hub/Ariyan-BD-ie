@@ -60,6 +60,7 @@ data class VpnRuntimeState(
     val blockedCount: Int = 0,
     val totalBytes: Long = 0L,
     val mitmActive: Boolean = false,
+    val caTrusted: Boolean = false,
     val pinningBypassCount: Int = 0,
     val errorMessage: String? = null
 )
@@ -81,6 +82,12 @@ class NetTraceVpnService : VpnService() {
 
         private val _runtimeState = MutableStateFlow(VpnRuntimeState())
         val runtimeState: StateFlow<VpnRuntimeState> = _runtimeState.asStateFlow()
+
+        private val pinningBypassedHosts = ConcurrentHashMap.newKeySet<String>()
+
+        fun clearPinningBypassCache() {
+            pinningBypassedHosts.clear()
+        }
 
         fun startCapture(
             context: Context,
@@ -119,7 +126,7 @@ class NetTraceVpnService : VpnService() {
     private var dbWriteJob: Job? = null
     private var cleanupJob: Job? = null
 
-    private var tunWriteChannel = Channel<ByteArray>(capacity = 2048)
+    private var tunWriteChannel = Channel<ByteArray>(capacity = 4096)
     private var dbWriteChannel = Channel<suspend () -> Unit>(capacity = 4096)
 
     @Volatile
@@ -128,8 +135,13 @@ class NetTraceVpnService : VpnService() {
     @Volatile
     private var mitmEnabled: Boolean = true
 
+    @Volatile
+    private var caTrustedByDevice: Boolean = false
+
+    @Volatile
+    private var caTrustChecked: Boolean = false
+
     private val dnsHostMap = ConcurrentHashMap<String, String>()
-    private val pinningBypassedHosts = ConcurrentHashMap.newKeySet<String>()
     private val tcpSessions = ConcurrentHashMap<String, TcpFlowSession>()
     private val pendingBridgeSessions = ConcurrentHashMap<Int, TcpFlowSession>()
     private val udpSockets = ConcurrentHashMap<String, UdpFlowSocket>()
@@ -163,11 +175,12 @@ class NetTraceVpnService : VpnService() {
         @Volatile var lastActivityAt: Long = startedAt
         @Volatile var synAckSent: Boolean = false
         @Volatile var clientFinReceived: Boolean = false
+        @Volatile var pendingFinSeq: Long? = null
         @Volatile var localSocket: Socket? = null
         @Volatile var upstreamSocket: Socket? = null
         @Volatile var tunBridgeReaderJob: Job? = null
         @Volatile var txWriterJob: Job? = null
-        val txChannel = Channel<ByteArray>(capacity = 512)
+        val txChannel = Channel<ByteArray>(capacity = 2048)
         val oooBuffer = TreeMap<Long, ByteArray>()
 
         // Used when falling back to raw non-HTTP tunnel capture
@@ -190,6 +203,8 @@ class NetTraceVpnService : VpnService() {
         val readerJob: Job,
         @Volatile var lastActivityAt: Long = System.currentTimeMillis(),
         @Volatile var lastPacketId: Long = 0L,
+        @Volatile var lastDbRecordedAt: Long = 0L,
+        @Volatile var lastDbUpdatedAt: Long = 0L,
         @Volatile var totalTx: Int = 0,
         @Volatile var totalRx: Int = 0
     )
@@ -223,7 +238,8 @@ class NetTraceVpnService : VpnService() {
         currentTargetPkg = targetPkg
         currentTargetLabel = targetLabel
         mitmEnabled = enableMitm
-        pinningBypassedHosts.clear()
+        caTrustedByDevice = false
+        caTrustChecked = false
         packetCounter.set(0)
         blockedCounter.set(0)
         byteCounter.set(0L)
@@ -233,7 +249,11 @@ class NetTraceVpnService : VpnService() {
             .addAddress("10.110.0.2", 32)
             .addRoute("0.0.0.0", 0)
             .addDnsServer("8.8.8.8")
+            .addDnsServer("1.1.1.1")
             .setMtu(1500)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setMetered(false)
+        }
 
         try {
             builder.addAllowedApplication(targetPkg)
@@ -309,7 +329,7 @@ class NetTraceVpnService : VpnService() {
             }
         }
 
-        tunWriteChannel = Channel(capacity = 2048)
+        tunWriteChannel = Channel(capacity = 4096)
         dbWriteChannel = Channel(capacity = 4096)
 
         dbWriteJob = scope.launch {
@@ -354,14 +374,22 @@ class NetTraceVpnService : VpnService() {
         }
 
         captureJob = scope.launch {
+            if (mitmEnabled) {
+                runCatching { certMgr.ensureCa() }
+            }
+            val trusted = runCatching { certMgr.isCaTrustedByAndroid() }.getOrDefault(false)
+            caTrustedByDevice = trusted
+            caTrustChecked = true
+
             activeSessionId = repo.startLiveSession(targetLabel, targetPkg)
             _runtimeState.value = VpnRuntimeState(
                 isRunning = true,
                 sessionId = activeSessionId,
                 targetPackage = targetPkg,
                 targetAppName = targetLabel,
-                mitmActive = mitmEnabled,
-                pinningBypassCount = 0
+                mitmActive = mitmEnabled && trusted,
+                caTrusted = trusted,
+                pinningBypassCount = pinningBypassedHosts.size
             )
 
             val input = FileInputStream(pfd.fileDescriptor)
@@ -433,13 +461,14 @@ class NetTraceVpnService : VpnService() {
             protect(sock)
             lateinit var flowHolder: UdpFlowSocket
             val job = scope.launch {
-                val recvBuf = ByteArray(8192)
+                val recvBuf = ByteArray(32768)
                 val recvPkt = DatagramPacket(recvBuf, recvBuf.size)
                 while (isActive && !sock.isClosed) {
                     try {
                         sock.receive(recvPkt)
                         val data = recvBuf.copyOfRange(0, recvPkt.length)
-                        flowHolder.lastActivityAt = System.currentTimeMillis()
+                        val now = System.currentTimeMillis()
+                        flowHolder.lastActivityAt = now
                         flowHolder.totalRx += data.size
                         var answerHeaders = "{}"
                         if (isDns) {
@@ -458,12 +487,14 @@ class NetTraceVpnService : VpnService() {
                             dstPort = udp.srcPort,
                             payload = data
                         )
-                        tunWriteChannel.trySend(replyIp)
+                        tunWriteChannel.send(replyIp)
                         val total = byteCounter.addAndGet(data.size.toLong())
                         _runtimeState.value = _runtimeState.value.copy(totalBytes = total)
 
                         val sid = activeSessionId
-                        if (sid != 0L && flowHolder.lastPacketId != 0L) {
+                        val shouldUpdateDb = isDns || (now - flowHolder.lastDbUpdatedAt) >= 1000L
+                        if (sid != 0L && flowHolder.lastPacketId != 0L && shouldUpdateDb) {
+                            flowHolder.lastDbUpdatedAt = now
                             val pid = flowHolder.lastPacketId
                             val rxTotal = flowHolder.totalRx
                             val respHex = cappedHex(data)
@@ -499,7 +530,8 @@ class NetTraceVpnService : VpnService() {
             flowHolder
         }
 
-        udpFlow.lastActivityAt = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        udpFlow.lastActivityAt = now
         udpFlow.totalTx += udp.payload.size
 
         runCatching {
@@ -507,28 +539,35 @@ class NetTraceVpnService : VpnService() {
             udpFlow.socket.send(DatagramPacket(udp.payload, udp.payload.size, destAddr, udp.dstPort))
         }
 
-        recordPacket(
-            method = protoLabel,
-            url = if (dnsQuery != null) "dns://$displayHost" else "udp://$displayHost:${udp.dstPort}",
-            host = displayHost,
-            path = if (dnsQuery != null) "/$dnsQuery" else "/",
-            port = udp.dstPort,
-            protocol = protoLabel,
-            statusCode = null,
-            reqHeadersJson = JSONObject()
-                .put("Dst-IP", ip.dstIpStr)
-                .put("Src-Port", udp.srcPort)
-                .toString(),
-            reqHex = cappedHex(udp.payload),
-            respHex = "",
-            durationMs = 1L,
-            bytesTx = udp.payload.size,
-            bytesRx = 0,
-            isBlocked = false,
-            blockReason = null,
-            ruleId = if (matchedRule?.action == "HIGHLIGHT") matchedRule.id else null,
-            onInserted = { id -> udpFlow.lastPacketId = id }
-        )
+        val shouldRecordTx = isDns || udpFlow.lastDbRecordedAt == 0L || (now - udpFlow.lastDbRecordedAt) >= 1000L
+        if (shouldRecordTx) {
+            udpFlow.lastDbRecordedAt = now
+            recordPacket(
+                method = protoLabel,
+                url = if (dnsQuery != null) "dns://$displayHost" else "udp://$displayHost:${udp.dstPort}",
+                host = displayHost,
+                path = if (dnsQuery != null) "/$dnsQuery" else "/",
+                port = udp.dstPort,
+                protocol = protoLabel,
+                statusCode = null,
+                reqHeadersJson = JSONObject()
+                    .put("Dst-IP", ip.dstIpStr)
+                    .put("Src-Port", udp.srcPort)
+                    .toString(),
+                reqHex = cappedHex(udp.payload),
+                respHex = "",
+                durationMs = 1L,
+                bytesTx = udp.payload.size,
+                bytesRx = 0,
+                isBlocked = false,
+                blockReason = null,
+                ruleId = if (matchedRule?.action == "HIGHLIGHT") matchedRule.id else null,
+                onInserted = { id -> udpFlow.lastPacketId = id }
+            )
+        } else {
+            val total = byteCounter.addAndGet(udp.payload.size.toLong())
+            _runtimeState.value = _runtimeState.value.copy(totalBytes = total)
+        }
     }
 
     private fun handleTcpPacket(raw: ByteArray, ip: Ipv4Header) {
@@ -671,7 +710,7 @@ class NetTraceVpnService : VpnService() {
                                         flags = TcpSegment.FLAG_PSH or TcpSegment.FLAG_ACK,
                                         payload = slice
                                     )
-                                    tunWriteChannel.trySend(psh)
+                                    tunWriteChannel.send(psh)
                                     offset += sliceLen
                                 }
                             }
@@ -693,7 +732,7 @@ class NetTraceVpnService : VpnService() {
                                     ackNum = finAck,
                                     flags = TcpSegment.FLAG_FIN or TcpSegment.FLAG_ACK
                                 )
-                                tunWriteChannel.trySend(fin)
+                                runCatching { tunWriteChannel.send(fin) }
                             }
                             tcpSessions.remove(flowKey, session)
                             closeTcpSession(session)
@@ -779,6 +818,10 @@ class NetTraceVpnService : VpnService() {
             }
 
             if (tcp.isFin && !session.clientFinReceived) {
+                session.pendingFinSeq = (tcp.seqNum + tcp.payload.size.toLong()) and 0xFFFFFFFFL
+            }
+
+            if (!session.clientFinReceived && session.pendingFinSeq == session.clientNextSeq) {
                 session.clientFinReceived = true
                 session.clientNextSeq = (session.clientNextSeq + 1L) and 0xFFFFFFFFL
                 finAckNeeded = true
@@ -829,18 +872,29 @@ class NetTraceVpnService : VpnService() {
         }
 
         try {
+            if (!caTrustChecked) {
+                caTrustedByDevice = runCatching { certMgr.isCaTrustedByAndroid() }.getOrDefault(false)
+                caTrustChecked = true
+            }
+
             clientSocket.tcpNoDelay = true
-            clientSocket.soTimeout = 20_000
+            val initialHostKey = session.hostName.lowercase(Locale.US)
+            val mayMitmHere = mitmEnabled && caTrustedByDevice && !pinningBypassedHosts.contains(initialHostKey)
+            clientSocket.soTimeout = if (mayMitmHere || session.serverPort == 443 || session.serverPort == 80) 1500 else 300
             val clientIn = clientSocket.getInputStream()
             val peekBuf = ByteArray(16384)
-            val firstLen = clientIn.read(peekBuf)
-            if (firstLen <= 0) {
+            val firstLen = try {
+                clientIn.read(peekBuf)
+            } catch (_: java.net.SocketTimeoutException) {
+                0
+            }
+            if (firstLen < 0) {
                 runCatching { clientSocket.close() }
                 return
             }
-            val firstBytes = peekBuf.copyOfRange(0, firstLen)
+            val firstBytes = if (firstLen > 0) peekBuf.copyOfRange(0, firstLen) else ByteArray(0)
 
-            val sni = PacketDissector.extractTlsSni(firstBytes)
+            val sni = if (firstBytes.isNotEmpty()) PacketDissector.extractTlsSni(firstBytes) else null
             if (!sni.isNullOrBlank()) {
                 session.hostName = sni
                 dnsHostMap[session.serverIpStr] = sni
@@ -850,7 +904,11 @@ class NetTraceVpnService : VpnService() {
                 (firstBytes[0].toInt() and 0xFF) == 0x16 &&
                 (firstBytes[5].toInt() and 0xFF) == 0x01
 
-            val preHttp = if (!isTlsClientHello) PacketDissector.tryParseHttpRequest(firstBytes) else null
+            val preHttp = if (firstBytes.isNotEmpty() && !isTlsClientHello) {
+                PacketDissector.tryParseHttpRequest(firstBytes)
+            } else {
+                null
+            }
             preHttp?.host?.let { h ->
                 val cleanH = h.substringBefore(':')
                 if (cleanH.isNotBlank()) session.hostName = cleanH
@@ -896,7 +954,7 @@ class NetTraceVpnService : VpnService() {
             }
 
             val hostKey = session.hostName.lowercase(Locale.US)
-            val attemptMitm = mitmEnabled && isTlsClientHello && !pinningBypassedHosts.contains(hostKey)
+            val attemptMitm = mitmEnabled && caTrustedByDevice && isTlsClientHello && !pinningBypassedHosts.contains(hostKey)
 
             if (attemptMitm) {
                 var plainUpstream: Socket? = null
@@ -1026,7 +1084,10 @@ class NetTraceVpnService : VpnService() {
                     isHttps = isTlsClientHello || session.serverPort == 443,
                     defaultHost = session.hostName,
                     port = session.serverPort,
-                    callbacks = createCallbacks(session)
+                    callbacks = createCallbacks(session),
+                    skipHttpPeek = firstBytes.isEmpty(),
+                    onClientEof = { runCatching { upstream.shutdownOutput() } },
+                    onServerEof = { runCatching { clientSocket.shutdownOutput() } }
                 )
             } finally {
                 runCatching { upstream?.close() }

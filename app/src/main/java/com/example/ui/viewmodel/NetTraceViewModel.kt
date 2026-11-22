@@ -260,6 +260,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun toggleHttpsMitm(enabled: Boolean) {
+        NetTraceVpnService.clearPinningBypassCache()
         viewModelScope.launch {
             prefs.setHttpsMitmEnabled(enabled)
             _snackbarMessage.value = if (vpnState.value.isRunning) {
@@ -271,6 +272,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun prepareCaInstallIntent(onReady: (Intent) -> Unit) {
+        NetTraceVpnService.clearPinningBypassCache()
         viewModelScope.launch {
             val intent = withContext(Dispatchers.IO) {
                 certManager.createInstallCaIntent()

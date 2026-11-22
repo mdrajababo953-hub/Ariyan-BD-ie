@@ -592,21 +592,12 @@ fun PayloadDecodedSection(
                 if (analysis.classification == PayloadClassification.ENCRYPTED_BLOCK ||
                     analysis.classification == PayloadClassification.RAW_BINARY
                 ) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        SelectionContainer {
-                            Text(
-                                text = analysis.hexDump,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.padding(12.dp)
-                            )
-                        }
-                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Binary payload (${analysis.byteCount} bytes) — use AES / XOR Key or Open in Lab to decrypt.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
@@ -746,7 +737,7 @@ fun PayloadDecodedSection(
                                         Spacer(modifier = Modifier.height(6.dp))
                                     }
                                     if (dec.protobuf == null) {
-                                        val fallback = dec.formattedJson ?: dec.utf8Text ?: dec.hexDump
+                                        val fallback = dec.formattedJson ?: dec.utf8Text ?: dec.hex.ifBlank { "<Empty Body>" }
                                         SelectionContainer {
                                             Text(
                                                 text = fallback,
@@ -806,7 +797,7 @@ private fun JsonTabContent(
         item {
             SyntaxHighlightedJsonBlock(
                 json = packetJson,
-                title = "Captured Request & Decoded Payload JSON",
+                title = "Decoded Request & Response JSON",
                 onCopy = onCopy
             )
         }
@@ -844,7 +835,6 @@ private fun HeadersAndHexTabContent(
             HexBlockCard(
                 title = "Request Body Hex (${reqAnalysis.byteCount}B)",
                 rawHex = packet.requestBodyHex,
-                hexDump = reqAnalysis.hexDump,
                 onCopyHex = {
                     clipboard.setText(AnnotatedString(packet.requestBodyHex))
                     onCopyToast("Request hex copied")
@@ -858,7 +848,6 @@ private fun HeadersAndHexTabContent(
             HexBlockCard(
                 title = "Response Body Hex (${respAnalysis.byteCount}B)",
                 rawHex = packet.responseBodyHex,
-                hexDump = respAnalysis.hexDump,
                 onCopyHex = {
                     clipboard.setText(AnnotatedString(packet.responseBodyHex))
                     onCopyToast("Response hex copied")
@@ -914,7 +903,6 @@ private fun HeadersCard(title: String, headers: Map<String, String>) {
 private fun HexBlockCard(
     title: String,
     rawHex: String,
-    hexDump: String,
     onCopyHex: () -> Unit
 ) {
     Surface(
@@ -952,8 +940,8 @@ private fun HexBlockCard(
             ) {
                 SelectionContainer {
                     Text(
-                        text = if (rawHex.isEmpty()) "<Empty Body>" else hexDump,
-                        style = MaterialTheme.typography.labelMedium,
+                        text = rawHex.ifBlank { "<Empty Body>" },
+                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }

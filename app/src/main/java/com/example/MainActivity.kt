@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.AppIcons
@@ -78,7 +79,10 @@ import com.example.ui.theme.AppAccentTheme
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.NetTraceTheme
 import com.example.ui.viewmodel.NetTraceViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 enum class MainTab(
     val labelRes: Int,
@@ -220,12 +224,58 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
     }
 
     val shareJsonText: (String) -> Unit = { jsonText ->
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/json"
-            putExtra(Intent.EXTRA_SUBJECT, "NetTrace Capture JSON")
-            putExtra(Intent.EXTRA_TEXT, jsonText)
+        if (jsonText.length <= 100_000) {
+            runCatching {
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/json"
+                    putExtra(Intent.EXTRA_SUBJECT, "NetTrace Capture JSON")
+                    putExtra(Intent.EXTRA_TEXT, jsonText)
+                }
+                context.startActivity(Intent.createChooser(intent, "Share Captured JSON"))
+            }.onFailure {
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("Unable to share JSON: ${it.message ?: "no app found"}")
+                }
+            }
+        } else {
+            coroutineScope.launch {
+                val shareResult = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
+                        exportDir.listFiles()?.forEach { old ->
+                            if (System.currentTimeMillis() - old.lastModified() > 3_600_000L) {
+                                old.delete()
+                            }
+                        }
+                        val outFile = File(exportDir, "nettrace_export_${System.currentTimeMillis()}.json")
+                        outFile.writeText(jsonText, Charsets.UTF_8)
+                        FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.fileprovider",
+                            outFile
+                        )
+                    }
+                }
+                shareResult.fold(
+                    onSuccess = { uri ->
+                        runCatching {
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "application/json"
+                                putExtra(Intent.EXTRA_SUBJECT, "NetTrace Capture JSON")
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(intent, "Share Captured JSON"))
+                        }.onFailure { err ->
+                            snackbarHostState.showSnackbar("Share failed: ${err.message}")
+                        }
+                    },
+                    onFailure = { err ->
+                        snackbarHostState.showSnackbar("Export file error: ${err.message}")
+                    }
+                )
+            }
         }
-        context.startActivity(Intent.createChooser(intent, "Share Captured JSON"))
     }
 
     val targetAppInfo = remember(installedApps, settings.targetApp.packageName) {

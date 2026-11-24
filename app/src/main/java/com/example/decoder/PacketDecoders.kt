@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.LinkedHashMap
 import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -412,32 +413,51 @@ data class PayloadAnalysis(
 )
 
 object PayloadAnalyzer {
-    fun quickClassify(hexInput: String): PayloadClassification {
-        val cleanHex = HexUtils.sanitizeHex(hexInput)
-        if (cleanHex.length < 2) return PayloadClassification.EMPTY
-        val bytes = HexUtils.hexToBytes(cleanHex)
-        if (bytes.isEmpty()) return PayloadClassification.EMPTY
+    private const val MAX_INPUT_SCAN_CHARS = 524_288
+    private const val MAX_DECODE_HEX_CHARS = 262_144
 
-        val textCandidate = tryReadableUtf8(bytes)
-        if (textCandidate != null) {
-            val trimmed = textCandidate.trim()
-            if (((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-                    (trimmed.startsWith("[") && trimmed.endsWith("]"))) &&
-                tryFormatJson(trimmed) != null
-            ) {
-                return PayloadClassification.JSON
+    private val classificationCache = object : LinkedHashMap<String, PayloadClassification>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PayloadClassification>?): Boolean {
+            return size > 256
+        }
+    }
+
+    fun quickClassify(hexInput: String): PayloadClassification {
+        if (hexInput.isBlank()) return PayloadClassification.EMPTY
+        val boundedInput = if (hexInput.length > MAX_INPUT_SCAN_CHARS) {
+            hexInput.substring(0, MAX_INPUT_SCAN_CHARS)
+        } else {
+            hexInput
+        }
+        val cleanHex = HexUtils.sanitizeHex(boundedInput).let {
+            if (it.length > MAX_DECODE_HEX_CHARS) it.substring(0, MAX_DECODE_HEX_CHARS) else it
+        }
+        if (cleanHex.length < 2) return PayloadClassification.EMPTY
+
+        synchronized(classificationCache) {
+            classificationCache[cleanHex]
+        }?.let { return it }
+
+        val bytes = HexUtils.hexToBytes(cleanHex)
+        val result = if (bytes.isEmpty()) {
+            PayloadClassification.EMPTY
+        } else {
+            val textCandidate = tryReadableUtf8(bytes)
+            when {
+                textCandidate != null && isValidJson(textCandidate.trim()) -> PayloadClassification.JSON
+                textCandidate != null && isCleanReadableText(textCandidate) -> PayloadClassification.TEXT
+                ProtobufWireDecoder.decode(bytes) != null -> PayloadClassification.PROTOBUF
+                bytes.size >= 16 && bytes.size % 16 == 0 -> PayloadClassification.ENCRYPTED_BLOCK
+                else -> PayloadClassification.RAW_BINARY
             }
-            if (isCleanReadableText(textCandidate)) {
-                return PayloadClassification.TEXT
+        }
+
+        if (cleanHex.length <= 16_384) {
+            synchronized(classificationCache) {
+                classificationCache[cleanHex] = result
             }
         }
-        if (ProtobufWireDecoder.decode(bytes) != null) {
-            return PayloadClassification.PROTOBUF
-        }
-        if (bytes.size >= 16 && bytes.size % 16 == 0) {
-            return PayloadClassification.ENCRYPTED_BLOCK
-        }
-        return PayloadClassification.RAW_BINARY
+        return result
     }
 
     fun isStructuredDecodable(hexInput: String): Boolean {
@@ -450,7 +470,14 @@ object PayloadAnalyzer {
     }
 
     fun analyze(hexInput: String): PayloadAnalysis {
-        val cleanHex = HexUtils.sanitizeHex(hexInput)
+        val boundedInput = if (hexInput.length > MAX_INPUT_SCAN_CHARS) {
+            hexInput.substring(0, MAX_INPUT_SCAN_CHARS)
+        } else {
+            hexInput
+        }
+        val cleanHex = HexUtils.sanitizeHex(boundedInput).let {
+            if (it.length > MAX_DECODE_HEX_CHARS) it.substring(0, MAX_DECODE_HEX_CHARS) else it
+        }
         val bytes = HexUtils.hexToBytes(cleanHex)
         if (bytes.isEmpty()) {
             return PayloadAnalysis(
@@ -549,6 +576,18 @@ object PayloadAnalyzer {
         if (text.isEmpty()) return false
         val printable = text.count { !it.isISOControl() || it == '\n' || it == '\r' || it == '\t' }
         return printable == text.length
+    }
+
+    private fun isValidJson(raw: String): Boolean {
+        if (!((raw.startsWith("{") && raw.endsWith("}")) || (raw.startsWith("[") && raw.endsWith("]")))) {
+            return false
+        }
+        return try {
+            if (raw.startsWith("{")) JSONObject(raw) else JSONArray(raw)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun tryFormatJson(raw: String): String? {

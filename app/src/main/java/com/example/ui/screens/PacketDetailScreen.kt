@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -47,7 +48,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,6 +61,9 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.example.R
 import com.example.data.db.CapturedPacketEntity
 import com.example.decoder.DecryptMode
@@ -83,6 +89,15 @@ import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.VioletProto
 
+private data class PacketDetailComputed(
+    val packetJson: String,
+    val reqHeaders: Map<String, String>,
+    val respHeaders: Map<String, String>,
+    val jwtDecoded: JwtDecodeResult?,
+    val reqAnalysis: PayloadAnalysis,
+    val respAnalysis: PayloadAnalysis
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PacketDetailScreen(
@@ -100,21 +115,20 @@ fun PacketDetailScreen(
     val clipboard = LocalClipboardManager.current
     var selectedTab by remember(packet.id) { mutableIntStateOf(0) }
 
-    val packetJson = remember(packet) { PacketJsonSerializer.packetToFormattedJson(packet) }
-    val reqHeaders = remember(packet.requestHeadersJson) {
-        PacketJsonSerializer.parseHeadersMap(packet.requestHeadersJson)
-    }
-    val respHeaders = remember(packet.responseHeadersJson) {
-        PacketJsonSerializer.parseHeadersMap(packet.responseHeadersJson)
-    }
-    val jwtDecoded = remember(packet.requestHeadersJson) {
-        JwtDecoder.extractFromHeaders(packet.requestHeadersJson)
-    }
-    val reqAnalysis = remember(packet.requestBodyHex) {
-        PayloadAnalyzer.analyze(packet.requestBodyHex)
-    }
-    val respAnalysis = remember(packet.responseBodyHex) {
-        PayloadAnalyzer.analyze(packet.responseBodyHex)
+    val computed by produceState<PacketDetailComputed?>(
+        initialValue = null,
+        key1 = packet
+    ) {
+        value = withContext(Dispatchers.Default) {
+            PacketDetailComputed(
+                packetJson = PacketJsonSerializer.packetToFormattedJson(packet),
+                reqHeaders = PacketJsonSerializer.parseHeadersMap(packet.requestHeadersJson),
+                respHeaders = PacketJsonSerializer.parseHeadersMap(packet.responseHeadersJson),
+                jwtDecoded = JwtDecoder.extractFromHeaders(packet.requestHeadersJson),
+                reqAnalysis = PayloadAnalyzer.analyze(packet.requestBodyHex),
+                respAnalysis = PayloadAnalyzer.analyze(packet.responseBodyHex)
+            )
+        }
     }
 
     val content: @Composable (PaddingValues) -> Unit = { innerPadding ->
@@ -182,31 +196,41 @@ fun PacketDetailScreen(
                 )
             }
 
-            when (selectedTab) {
-                0 -> DecodeTabContent(
-                    packet = packet,
-                    jwtDecoded = jwtDecoded,
-                    reqAnalysis = reqAnalysis,
-                    respAnalysis = respAnalysis,
-                    onCopyToast = onCopyToast,
-                    onSendToDecoderLab = onSendToDecoderLab
-                )
-                1 -> JsonTabContent(
-                    packetJson = packetJson,
-                    onCopy = {
-                        clipboard.setText(AnnotatedString(packetJson))
-                        onCopyToast("Packet JSON copied")
-                    },
-                    onShare = { onShareJson(packetJson) }
-                )
-                2 -> HeadersAndHexTabContent(
-                    packet = packet,
-                    reqHeaders = reqHeaders,
-                    respHeaders = respHeaders,
-                    reqAnalysis = reqAnalysis,
-                    respAnalysis = respAnalysis,
-                    onCopyToast = onCopyToast
-                )
+            val ready = computed
+            if (ready == null) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                when (selectedTab) {
+                    0 -> DecodeTabContent(
+                        packet = packet,
+                        jwtDecoded = ready.jwtDecoded,
+                        reqAnalysis = ready.reqAnalysis,
+                        respAnalysis = ready.respAnalysis,
+                        onCopyToast = onCopyToast,
+                        onSendToDecoderLab = onSendToDecoderLab
+                    )
+                    1 -> JsonTabContent(
+                        packetJson = ready.packetJson,
+                        onCopy = {
+                            clipboard.setText(AnnotatedString(ready.packetJson))
+                            onCopyToast("Packet JSON copied")
+                        },
+                        onShare = { onShareJson(ready.packetJson) }
+                    )
+                    2 -> HeadersAndHexTabContent(
+                        packet = packet,
+                        reqHeaders = ready.reqHeaders,
+                        respHeaders = ready.respHeaders,
+                        reqAnalysis = ready.reqAnalysis,
+                        respAnalysis = ready.respAnalysis,
+                        onCopyToast = onCopyToast
+                    )
+                }
             }
         }
     }
@@ -225,16 +249,20 @@ fun PacketDetailScreen(
                     },
                     actions = {
                         IconButton(
+                            enabled = computed != null,
                             onClick = {
-                                clipboard.setText(AnnotatedString(packetJson))
-                                onCopyToast("Packet JSON copied")
+                                computed?.packetJson?.let { json ->
+                                    clipboard.setText(AnnotatedString(json))
+                                    onCopyToast("Packet JSON copied")
+                                }
                             },
                             modifier = Modifier.testTag("detail_copy_json_button")
                         ) {
                             Icon(AppIcons.ContentCopy, contentDescription = stringResource(R.string.cd_copy))
                         }
                         IconButton(
-                            onClick = { onShareJson(packetJson) },
+                            enabled = computed != null,
+                            onClick = { computed?.packetJson?.let(onShareJson) },
                             modifier = Modifier.testTag("detail_share_json_button")
                         ) {
                             Icon(Icons.Default.Share, contentDescription = stringResource(R.string.cd_share))
@@ -272,16 +300,20 @@ fun PacketDetailScreen(
                     },
                     actions = {
                         IconButton(
+                            enabled = computed != null,
                             onClick = {
-                                clipboard.setText(AnnotatedString(packetJson))
-                                onCopyToast("Packet JSON copied")
+                                computed?.packetJson?.let { json ->
+                                    clipboard.setText(AnnotatedString(json))
+                                    onCopyToast("Packet JSON copied")
+                                }
                             },
                             modifier = Modifier.testTag("detail_copy_json_button")
                         ) {
                             Icon(AppIcons.ContentCopy, contentDescription = stringResource(R.string.cd_copy))
                         }
                         IconButton(
-                            onClick = { onShareJson(packetJson) },
+                            enabled = computed != null,
+                            onClick = { computed?.packetJson?.let(onShareJson) },
                             modifier = Modifier.testTag("detail_share_json_button")
                         ) {
                             Icon(Icons.Default.Share, contentDescription = stringResource(R.string.cd_share))
@@ -477,12 +509,14 @@ fun PayloadDecodedSection(
     onCopyToast: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit
 ) {
+    val decryptScope = rememberCoroutineScope()
     var protoViewMode by remember(rawHex) { mutableIntStateOf(0) }
     var showDecryptor by remember(rawHex) { mutableStateOf(false) }
     var keyInput by remember { mutableStateOf("") }
     var ivInput by remember { mutableStateOf("") }
     var keyIsHex by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf(DecryptMode.AES_CBC_PKCS5) }
+    var isDecrypting by remember(rawHex) { mutableStateOf(false) }
     var decryptResult by remember(rawHex) { mutableStateOf<PayloadAnalysis?>(null) }
     var decryptError by remember(rawHex) { mutableStateOf<String?>(null) }
 
@@ -534,8 +568,14 @@ fun PayloadDecodedSection(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 analysis.protobuf?.let { proto ->
-                    val asyncSnippet = remember(proto, endpointPath) {
-                        ProtobufFieldsFormatter.formatAsyncSnippet(proto.fields, endpointPath)
+                    val asyncSnippet by produceState(
+                        initialValue = "",
+                        key1 = proto,
+                        key2 = endpointPath
+                    ) {
+                        value = withContext(Dispatchers.Default) {
+                            ProtobufFieldsFormatter.formatAsyncSnippet(proto.fields, endpointPath)
+                        }
                     }
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -688,26 +728,34 @@ fun PayloadDecodedSection(
                             Switch(checked = keyIsHex, onCheckedChange = { keyIsHex = it })
                             Spacer(modifier = Modifier.weight(1f))
                             Button(
+                                enabled = !isDecrypting,
                                 onClick = {
-                                    PayloadDecryptor.decrypt(
-                                        payloadHex = rawHex,
-                                        keyInput = keyInput,
-                                        ivInput = ivInput,
-                                        keyIsHex = keyIsHex,
-                                        mode = mode
-                                    ).fold(
-                                        onSuccess = {
-                                            decryptResult = it
-                                            decryptError = null
-                                        },
-                                        onFailure = {
-                                            decryptResult = null
-                                            decryptError = it.message
+                                    isDecrypting = true
+                                    decryptScope.launch {
+                                        val res = withContext(Dispatchers.Default) {
+                                            PayloadDecryptor.decrypt(
+                                                payloadHex = rawHex,
+                                                keyInput = keyInput,
+                                                ivInput = ivInput,
+                                                keyIsHex = keyIsHex,
+                                                mode = mode
+                                            )
                                         }
-                                    )
+                                        res.fold(
+                                            onSuccess = {
+                                                decryptResult = it
+                                                decryptError = null
+                                            },
+                                            onFailure = {
+                                                decryptResult = null
+                                                decryptError = it.message
+                                            }
+                                        )
+                                        isDecrypting = false
+                                    }
                                 }
                             ) {
-                                Text("Decrypt")
+                                Text(if (isDecrypting) "Decrypting..." else "Decrypt")
                             }
                         }
 
@@ -824,9 +872,15 @@ private fun HeadersAndHexTabContent(
     val activeHex = if (showResponse) packet.responseBodyHex else packet.requestBodyHex
     val activeAnalysis = if (showResponse) respAnalysis else reqAnalysis
     val activeHeaders = if (showResponse) respHeaders else reqHeaders
-    val formattedBody = remember(activeHex, spacedHex) {
-        if (spacedHex) HexUtils.formatSpacedHex(activeHex)
-        else HexUtils.sanitizeHex(activeHex).uppercase().ifBlank { "<Empty Body>" }
+    val formattedBody by produceState(
+        initialValue = if (activeHex.isBlank()) "<Empty Body>" else "",
+        key1 = activeHex,
+        key2 = spacedHex
+    ) {
+        value = withContext(Dispatchers.Default) {
+            if (spacedHex) HexUtils.formatSpacedHex(activeHex)
+            else HexUtils.sanitizeHex(activeHex).uppercase().ifBlank { "<Empty Body>" }
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {

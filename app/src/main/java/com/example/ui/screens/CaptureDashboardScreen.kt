@@ -949,23 +949,40 @@ private fun TargetIsolationHeroCard(
                             }
                         }
 
-                        FilterChip(
-                            selected = onlyDecodableHttp,
-                            enabled = !isLive,
-                            onClick = { onToggleOnlyDecodable(!onlyDecodableHttp) },
-                            label = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            FilterChip(
+                                selected = onlyDecodableHttp,
+                                enabled = !isLive,
+                                onClick = { onToggleOnlyDecodable(!onlyDecodableHttp) },
+                                label = {
+                                    Text(
+                                        text = if (onlyDecodableHttp) "Decodable JSON/Proto Only" else "Save All HTTP",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                },
+                                modifier = Modifier.testTag("vpn_only_decodable_toggle")
+                            )
+                            if (vpnState.skippedNonDecodableCount > 0) {
                                 Text(
-                                    text = if (onlyDecodableHttp) "Decodable JSON/Proto Only" else "Save All HTTP",
-                                    style = MaterialTheme.typography.labelSmall
+                                    text = "${vpnState.skippedNonDecodableCount} skipped",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                            },
-                            modifier = Modifier.testTag("vpn_only_decodable_toggle")
-                        )
+                            }
+                        }
 
                         Text(
                             text = when {
                                 vpnState.isRunning && !vpnState.caTrusted ->
-                                    "TCP/UDP passes normally. Install & trust NetTrace CA or use Local Proxy (:8080) for pinned HTTPS."
+                                    "TCP/UDP passes normally. Trust NetTrace CA for HTTPS MITM or use Local Proxy (:8080) if pinned."
+                                vpnState.isRunning && vpnState.pinningBypassCount > 0 ->
+                                    "HTTPS MITM active (${vpnState.pinningBypassCount} pinned host(s) passed through untouched)."
+                                vpnState.isRunning && vpnState.mitmActive ->
+                                    "HTTPS MITM active — capturing HTTP/HTTPS directly from ${targetApp.appName} without config edits."
                                 else ->
                                     "Captures only decodable HTTP/HTTPS endpoints; UDP/TCP streams stay unblocked."
                             },

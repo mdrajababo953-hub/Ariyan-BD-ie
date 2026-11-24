@@ -37,6 +37,7 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -69,6 +70,8 @@ import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.VioletProto
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -98,7 +101,7 @@ fun AppIconAvatar(
 ) {
     val bitmap = remember(drawable) {
         drawable?.let {
-            runCatching { it.toBitmap(128, 128).asImageBitmap() }.getOrNull()
+            runCatching { it.toBitmap(96, 96).asImageBitmap() }.getOrNull()
         }
     }
     if (bitmap != null) {
@@ -162,11 +165,17 @@ fun PacketRowCard(
     modifier: Modifier = Modifier
 ) {
     val haptic = LocalHapticFeedback.current
-    val respClassification = remember(packet.responseBodyHex, packet.requestBodyHex) {
-        when {
-            packet.responseBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.responseBodyHex)
-            packet.requestBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.requestBodyHex)
-            else -> PayloadClassification.EMPTY
+    val respClassification by produceState(
+        initialValue = PayloadClassification.EMPTY,
+        key1 = packet.responseBodyHex,
+        key2 = packet.requestBodyHex
+    ) {
+        value = withContext(Dispatchers.Default) {
+            when {
+                packet.responseBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.responseBodyHex)
+                packet.requestBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.requestBodyHex)
+                else -> PayloadClassification.EMPTY
+            }
         }
     }
 
@@ -367,8 +376,19 @@ fun SyntaxHighlightedJsonBlock(
     val numColor = AmberSignal
     val punctColor = MaterialTheme.colorScheme.onSurfaceVariant
 
-    val highlighted = remember(json, keyColor, punctColor) {
-        highlightJson(json, keyColor, strColor, numColor, punctColor)
+    val highlighted by produceState(
+        initialValue = AnnotatedString(json),
+        key1 = json,
+        key2 = keyColor,
+        key3 = punctColor
+    ) {
+        value = if (json.length > 24_000) {
+            AnnotatedString(json)
+        } else {
+            withContext(Dispatchers.Default) {
+                highlightJson(json, keyColor, strColor, numColor, punctColor)
+            }
+        }
     }
 
     Surface(
@@ -593,8 +613,19 @@ fun PythonFieldsCodeBlock(
     val numColor = AmberSignal
     val defaultColor = MaterialTheme.colorScheme.onSurface
 
-    val highlighted = remember(code, keyColor, defaultColor) {
-        highlightPythonCode(code, kwColor, keyColor, strColor, numColor, defaultColor)
+    val highlighted by produceState(
+        initialValue = AnnotatedString(code),
+        key1 = code,
+        key2 = keyColor,
+        key3 = defaultColor
+    ) {
+        value = if (code.length > 24_000) {
+            AnnotatedString(code)
+        } else {
+            withContext(Dispatchers.Default) {
+                highlightPythonCode(code, kwColor, keyColor, strColor, numColor, defaultColor)
+            }
+        }
     }
 
     Surface(

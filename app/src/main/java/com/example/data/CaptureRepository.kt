@@ -6,7 +6,9 @@ import com.example.data.db.NetTraceDatabase
 import com.example.data.db.TrafficRuleEntity
 import com.example.decoder.PacketJsonSerializer
 import com.example.decoder.RawPacketImporter
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 
 class CaptureRepository(private val db: NetTraceDatabase) {
     private val sessionDao = db.sessionDao()
@@ -140,7 +142,9 @@ class CaptureRepository(private val db: NetTraceDatabase) {
         targetPackageName: String,
         rawText: String
     ): Long? {
-        val tempPackets = RawPacketImporter.parseRawText(rawText, sessionId = 0L)
+        val tempPackets = withContext(Dispatchers.Default) {
+            RawPacketImporter.parseRawText(rawText, sessionId = 0L)
+        }
         if (tempPackets.isEmpty()) return null
 
         val totalBytes = tempPackets.sumOf { (it.bytesTx + it.bytesRx).toLong() }
@@ -166,6 +170,8 @@ class CaptureRepository(private val db: NetTraceDatabase) {
     suspend fun exportSessionAsJson(sessionId: Long): String? {
         val session = sessionDao.getSessionById(sessionId) ?: return null
         val packets = packetDao.getPacketsForSessionOnce(sessionId)
-        return PacketJsonSerializer.sessionToFormattedJson(session, packets)
+        return withContext(Dispatchers.Default) {
+            PacketJsonSerializer.sessionToFormattedJson(session, packets)
+        }
     }
 }

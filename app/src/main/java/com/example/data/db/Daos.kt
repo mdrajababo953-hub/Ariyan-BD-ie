@@ -58,7 +58,7 @@ interface CaptureSessionDao {
 
 @Dao
 interface CapturedPacketDao {
-    @Query("SELECT * FROM captured_packets WHERE sessionId = :sessionId ORDER BY timestamp DESC, id DESC")
+    @Query("SELECT * FROM captured_packets WHERE sessionId = :sessionId ORDER BY timestamp DESC, id DESC LIMIT 400")
     fun observePacketsForSession(sessionId: Long): Flow<List<CapturedPacketEntity>>
 
     @Query("SELECT * FROM captured_packets WHERE id = :packetId")

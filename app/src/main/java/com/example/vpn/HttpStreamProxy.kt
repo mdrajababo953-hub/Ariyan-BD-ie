@@ -1,6 +1,7 @@
 package com.example.vpn
 
 import com.example.decoder.HexUtils
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -76,6 +77,7 @@ object HttpStreamProxy {
         port: Int,
         callbacks: HttpCaptureCallbacks,
         skipHttpPeek: Boolean = false,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
         onClientEof: (() -> Unit)? = null,
         onServerEof: (() -> Unit)? = null
     ) {
@@ -99,6 +101,7 @@ object HttpStreamProxy {
                 host = defaultHost,
                 port = port,
                 callbacks = callbacks,
+                ioDispatcher = ioDispatcher,
                 onClientEof = onClientEof,
                 onServerEof = onServerEof
             )
@@ -127,6 +130,7 @@ object HttpStreamProxy {
                 host = defaultHost,
                 port = port,
                 callbacks = callbacks,
+                ioDispatcher = ioDispatcher,
                 onClientEof = onClientEof,
                 onServerEof = onServerEof
             )
@@ -136,7 +140,7 @@ object HttpStreamProxy {
         val pendingQueue = Channel<CapturedHttpRequestMeta>(capacity = 64)
         val bufferedServer = java.io.BufferedInputStream(serverIn, 16384)
 
-        val responseJob: Job = scope.launch(Dispatchers.IO) {
+        val responseJob: Job = scope.launch(ioDispatcher) {
             try {
                 while (isActive) {
                     val headerBytes = readHeaderBlock(bufferedServer) ?: break
@@ -269,10 +273,11 @@ object HttpStreamProxy {
         host: String,
         port: Int,
         callbacks: HttpCaptureCallbacks,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
         onClientEof: (() -> Unit)? = null,
         onServerEof: (() -> Unit)? = null
     ) {
-        val respJob = scope.launch(Dispatchers.IO) {
+        val respJob = scope.launch(ioDispatcher) {
             val buf = ByteArray(8192)
             try {
                 while (isActive) {
@@ -326,7 +331,10 @@ object HttpStreamProxy {
             val n = input.read(buf, total, buf.size - total)
             if (n <= 0) break
             total += n
-            if (input.available() == 0) break
+            // Wait until we have at least 8 bytes (covers "OPTIONS ") if client hasn't paused
+            if (total >= 8 && input.available() == 0) break
+            val hasSpace = (0 until total).any { buf[it] == ' '.code.toByte() }
+            if (hasSpace && input.available() == 0) break
         }
         return total
     }

@@ -547,4 +547,204 @@ class VpnMitmTest {
         assertEquals("08f4f3c8cf3d", tx.responseBodyHex)
         assertTrue(com.example.decoder.PayloadAnalyzer.hasDecodablePayload(tx.requestBodyHex, tx.responseBodyHex))
     }
+
+    @Test
+    fun `packet dissector supports ipv6 tcp udp dns aaaa and tls record length`() {
+        val srcV6 = java.net.InetAddress.getByName("fd00:10:110::2").address
+        val dstV6 = java.net.InetAddress.getByName("2001:4860:4860::8888").address
+
+        val udpV6 = PacketBuilder.buildUdpPacket(true, srcV6, dstV6, 51234, 53, byteArrayOf(5, 6, 7))
+        val ipUdp = PacketDissector.parseIp(udpV6, udpV6.size)!!
+        assertTrue(ipUdp.isIpv6)
+        assertEquals(PacketDissector.PROTO_UDP, ipUdp.protocol)
+        val parsedUdp = PacketDissector.parseUdp(udpV6, ipUdp)!!
+        assertEquals(51234, parsedUdp.srcPort)
+        assertEquals(53, parsedUdp.dstPort)
+        assertTrue(parsedUdp.payload.contentEquals(byteArrayOf(5, 6, 7)))
+
+        val tcpV6 = PacketBuilder.buildTcpPacket(
+            isIpv6 = true,
+            srcIp = srcV6,
+            dstIp = dstV6,
+            srcPort = 44000,
+            dstPort = 443,
+            seqNum = 123456L,
+            ackNum = 789012L,
+            flags = com.example.vpn.TcpSegment.FLAG_PSH or com.example.vpn.TcpSegment.FLAG_ACK,
+            payload = "GET / HTTP/1.1\r\n".toByteArray()
+        )
+        val ipTcp = PacketDissector.parseIp(tcpV6, tcpV6.size)!!
+        assertTrue(ipTcp.isIpv6)
+        val parsedTcp = PacketDissector.parseTcp(tcpV6, ipTcp)!!
+        assertEquals(44000, parsedTcp.srcPort)
+        assertEquals(443, parsedTcp.dstPort)
+        assertEquals(123456L, parsedTcp.seqNum)
+        assertEquals(789012L, parsedTcp.ackNum)
+
+        // DNS answer with AAAA (type 28) for "game.example"
+        val dnsPayload = ByteArrayOutputStream().apply {
+            write(byteArrayOf(0x12, 0x34, 0x81.toByte(), 0x80.toByte())) // id + flags
+            write(byteArrayOf(0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00)) // qd=1, an=1
+            write(byteArrayOf(4)); write("game".toByteArray())
+            write(byteArrayOf(7)); write("example".toByteArray())
+            write(byteArrayOf(0))
+            write(byteArrayOf(0x00, 0x1C, 0x00, 0x01)) // QTYPE AAAA, IN
+            write(byteArrayOf(0xC0.toByte(), 0x0C)) // name pointer
+            write(byteArrayOf(0x00, 0x1C, 0x00, 0x01)) // TYPE AAAA, IN
+            write(byteArrayOf(0x00, 0x00, 0x00, 0x3C)) // TTL 60
+            write(byteArrayOf(0x00, 0x10)) // RDLENGTH 16
+            write(dstV6)
+        }.toByteArray()
+        val answers = PacketDissector.extractDnsAnswers(dnsPayload)!!
+        assertEquals("game.example", answers.first)
+        assertTrue(answers.second.first().contains("2001:4860:4860"))
+
+        val tlsHeader = byteArrayOf(0x16, 0x03, 0x01, 0x01, 0x20)
+        assertEquals(5 + 0x0120, PacketDissector.expectedTlsRecordLength(tlsHeader))
+    }
+
+    @Test
+    fun `http stream proxy recognizes fragmented HTTP method across initial reads`() = runTest {
+        val clientOutCapture = ByteArrayOutputStream()
+        val serverOutCapture = ByteArrayOutputStream()
+        val clientPipeIn = PipedInputStream()
+        val clientPipeWriter = PipedOutputStream(clientPipeIn)
+        val serverPipeIn = PipedInputStream()
+        val serverPipeWriter = PipedOutputStream(serverPipeIn)
+
+        val capturedReqs = mutableListOf<CapturedHttpRequestMeta>()
+        val capturedResps = mutableListOf<String>()
+
+        val relayJob = launch(Dispatchers.IO) {
+            HttpStreamProxy.relayStream(
+                scope = this,
+                clientIn = clientPipeIn,
+                clientOut = clientOutCapture,
+                serverIn = serverPipeIn,
+                serverOut = serverOutCapture,
+                initialClientBytes = "PO".toByteArray(Charsets.ISO_8859_1),
+                isHttps = true,
+                defaultHost = "clientbp.ggpolarbear.com",
+                port = 443,
+                callbacks = object : HttpCaptureCallbacks {
+                    override fun onHttpRequest(meta: CapturedHttpRequestMeta) {
+                        synchronized(capturedReqs) { capturedReqs.add(meta) }
+                    }
+                    override fun onHttpResponse(
+                        meta: CapturedHttpRequestMeta,
+                        statusCode: Int?,
+                        responseHeadersJson: String,
+                        responseBodyHex: String,
+                        bytesRx: Int,
+                        durationMs: Long
+                    ) {
+                        synchronized(capturedResps) { capturedResps.add(responseBodyHex) }
+                    }
+                    override fun onRawTunnelBytes(
+                        isHttps: Boolean,
+                        host: String,
+                        port: Int,
+                        reqBytes: ByteArray?,
+                        respBytes: ByteArray?
+                    ) = Unit
+                    override fun onBytesTransferred(bytes: Int) = Unit
+                }
+            )
+        }
+
+        clientPipeWriter.write(
+            ("ST /GetHeroicInfo HTTP/1.1\r\n" +
+                "Host: clientbp.ggpolarbear.com\r\n" +
+                "Content-Length: 2\r\n\r\n{}").toByteArray(Charsets.ISO_8859_1)
+        )
+        clientPipeWriter.flush()
+        Thread.sleep(60)
+        serverPipeWriter.write(
+            ("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n").toByteArray(Charsets.ISO_8859_1) +
+                HexUtils.hexToBytes("0801")
+        )
+        serverPipeWriter.flush()
+        Thread.sleep(60)
+        clientPipeWriter.close()
+        serverPipeWriter.close()
+        relayJob.join()
+
+        assertEquals(1, capturedReqs.size)
+        assertEquals("POST", capturedReqs[0].method)
+        assertEquals("https://clientbp.ggpolarbear.com/GetHeroicInfo", capturedReqs[0].url)
+        assertEquals(listOf("0801"), capturedResps)
+    }
+
+    @Test
+    fun `local forward proxy streams chunked unknown-length response cleanly`() = runTest {
+        val upstreamSock = java.net.ServerSocket(0, 4, java.net.InetAddress.getLoopbackAddress())
+        val largeJson = "{\"items\":\"" + "a".repeat(20_000) + "\"}"
+        val upstreamJob = launch(Dispatchers.IO) {
+            upstreamSock.accept().use { conn ->
+                val buf = ByteArray(2048)
+                conn.getInputStream().read(buf)
+                val out = conn.getOutputStream()
+                val header = (
+                    "HTTP/1.1 200 OK\r\n" +
+                        "Content-Type: application/json\r\n" +
+                        "Transfer-Encoding: chunked\r\n" +
+                        "Connection: close\r\n\r\n"
+                    ).toByteArray(Charsets.ISO_8859_1)
+                out.write(header)
+                val bodyBytes = largeJson.toByteArray(Charsets.UTF_8)
+                out.write("${bodyBytes.size.toString(16)}\r\n".toByteArray(Charsets.ISO_8859_1))
+                out.write(bodyBytes)
+                out.write("\r\n0\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+                out.flush()
+            }
+        }
+
+        val captured = java.util.concurrent.CopyOnWriteArrayList<com.example.proxy.CapturedProxyTransaction>()
+        val proxyScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        val engine = com.example.proxy.LocalForwardProxyEngine(
+            port = 0,
+            forwardBaseUrl = "http://127.0.0.1:${upstreamSock.localPort}",
+            bindAddress = "127.0.0.1"
+        ) { tx ->
+            captured.add(tx)
+        }
+        val proxyPort = engine.start(proxyScope)
+
+        val unchunkedBody = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            java.net.Socket("127.0.0.1", proxyPort).use { client ->
+                client.soTimeout = 5000
+                client.getOutputStream().write(
+                    ("GET /LargeList HTTP/1.1\r\nHost: 127.0.0.1:$proxyPort\r\nConnection: close\r\n\r\n")
+                        .toByteArray(Charsets.ISO_8859_1)
+                )
+                client.getOutputStream().flush()
+                val rawAll = client.getInputStream().readBytes()
+                val rawStr = String(rawAll, Charsets.ISO_8859_1)
+                assertTrue(rawStr.contains("Transfer-Encoding: chunked"))
+                val bodyPart = rawStr.substringAfter("\r\n\r\n")
+                val out = StringBuilder()
+                var pos = 0
+                while (pos < bodyPart.length) {
+                    val lineEnd = bodyPart.indexOf("\r\n", pos)
+                    if (lineEnd < 0) break
+                    val sizeHex = bodyPart.substring(pos, lineEnd).trim()
+                    val chunkSize = sizeHex.toIntOrNull(16) ?: break
+                    pos = lineEnd + 2
+                    if (chunkSize == 0) break
+                    out.append(bodyPart.substring(pos, minOf(bodyPart.length, pos + chunkSize)))
+                    pos += chunkSize + 2
+                }
+                out.toString()
+            }
+        }
+
+        upstreamJob.join()
+        engine.stop()
+        upstreamSock.close()
+
+        assertEquals(largeJson, unchunkedBody)
+        assertEquals(1, captured.size)
+        assertTrue(captured.first().bytesRx > 20_000)
+        assertEquals(largeJson, String(HexUtils.hexToBytes(captured.first().responseBodyHex), Charsets.UTF_8))
+    }
 }

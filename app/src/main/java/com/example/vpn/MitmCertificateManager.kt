@@ -50,19 +50,40 @@ class MitmCertificateManager(private val context: Context) {
     fun isCaReady(): Boolean = caCertFile.exists() && caKeyFile.exists()
 
     fun isCaTrustedByAndroid(): Boolean {
-        return runCatching {
+        val localCaBytes = runCatching { ensureCa().first.encoded }.getOrNull()
+        val storeMatched = runCatching {
             val ks = KeyStore.getInstance("AndroidCAStore")
             ks.load(null, null)
             val aliases = ks.aliases()
             while (aliases.hasMoreElements()) {
                 val alias = aliases.nextElement()
                 val cert = ks.getCertificate(alias) as? X509Certificate ?: continue
+                if (localCaBytes != null && cert.encoded.contentEquals(localCaBytes)) {
+                    return@runCatching true
+                }
                 val subject = cert.subjectX500Principal?.name.orEmpty()
                 if (subject.contains("NetTrace Local Proxy CA", ignoreCase = true)) {
                     return@runCatching true
                 }
             }
             false
+        }.getOrDefault(false)
+        if (storeMatched) return true
+
+        return runCatching {
+            val tmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
+            )
+            tmf.init(null as KeyStore?)
+            tmf.trustManagers
+                .filterIsInstance<javax.net.ssl.X509TrustManager>()
+                .any { tm ->
+                    tm.acceptedIssuers.any { issuer ->
+                        (localCaBytes != null && issuer.encoded.contentEquals(localCaBytes)) ||
+                            issuer.subjectX500Principal?.name.orEmpty()
+                                .contains("NetTrace Local Proxy CA", ignoreCase = true)
+                    }
+                }
         }.getOrDefault(false)
     }
 

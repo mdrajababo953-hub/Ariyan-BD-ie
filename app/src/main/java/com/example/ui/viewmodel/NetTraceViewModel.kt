@@ -31,6 +31,8 @@ import com.example.vpn.NetTraceVpnService
 import com.example.vpn.VpnRuntimeState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +42,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -131,20 +134,17 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     private val _fullDecodeState = MutableStateFlow(FullDecodeUiState())
     val fullDecodeState: StateFlow<FullDecodeUiState> = _fullDecodeState.asStateFlow()
 
-    private val _caReady = MutableStateFlow(certManager.isCaReady())
+    private val _caReady = MutableStateFlow(false)
     val caReady: StateFlow<Boolean> = _caReady.asStateFlow()
 
     private val _decoderLab = MutableStateFlow(
         DecoderLabState(
             inputText = "08f4f3c8cf3d102618ad0220ad02300170807d8001ad028801cc08a80101b001019a0200"
-        ).let {
-            it.copy(
-                jwtResult = JwtDecoder.decode(it.inputText),
-                payloadAnalysis = PayloadAnalyzer.analyze(it.inputText)
-            )
-        }
+        )
     )
     val decoderLab: StateFlow<DecoderLabState> = _decoderLab.asStateFlow()
+    private var decoderLabJob: Job? = null
+    private var decryptLabJob: Job? = null
 
     val activeSession: StateFlow<CaptureSessionEntity?> = combine(
         _selectedSessionId,
@@ -212,6 +212,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
             runCatching { certManager.ensureCa() }
             _caReady.value = certManager.isCaReady()
         }
+        recomputeDecoderLab(_decoderLab.value.inputText, _decoderLab.value.headerSkipBytes)
         refreshInstalledApps()
     }
 
@@ -543,23 +544,37 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun recomputeDecoderLab(input: String, headerSkipBytes: Int) {
-        val jwt = JwtDecoder.decode(input)
-        val cleanHex = HexUtils.sanitizeHex(input)
-        val skipChars = (headerSkipBytes * 2).coerceAtMost(cleanHex.length)
-        val headerHex = if (skipChars > 0) cleanHex.substring(0, skipChars).uppercase() else ""
-        val effectiveHex = if (skipChars > 0) cleanHex.substring(skipChars) else input
-        val analysis = if (jwt == null) PayloadAnalyzer.analyze(effectiveHex) else null
+        _decoderLab.update {
+            it.copy(
+                inputText = input,
+                headerSkipBytes = headerSkipBytes,
+                decryptedAnalysis = null,
+                decryptError = null
+            )
+        }
+        decoderLabJob?.cancel()
+        decoderLabJob = viewModelScope.launch(Dispatchers.Default) {
+            if (input.length > 512) {
+                delay(45L)
+            }
+            val jwt = JwtDecoder.decode(input)
+            val cleanHex = HexUtils.sanitizeHex(input)
+            val skipChars = (headerSkipBytes * 2).coerceAtMost(cleanHex.length)
+            val headerHex = if (skipChars > 0) cleanHex.substring(0, skipChars).uppercase() else ""
+            val effectiveHex = if (skipChars > 0) cleanHex.substring(skipChars) else input
+            val analysis = if (jwt == null) PayloadAnalyzer.analyze(effectiveHex) else null
 
-        _decoderLab.value = _decoderLab.value.copy(
-            inputText = input,
-            headerSkipBytes = headerSkipBytes,
-            headerHexPreview = headerHex,
-            effectivePayloadHex = effectiveHex,
-            jwtResult = jwt,
-            payloadAnalysis = analysis,
-            decryptedAnalysis = null,
-            decryptError = null
-        )
+            _decoderLab.update { cur ->
+                if (cur.inputText == input && cur.headerSkipBytes == headerSkipBytes) {
+                    cur.copy(
+                        headerHexPreview = headerHex,
+                        effectivePayloadHex = effectiveHex,
+                        jwtResult = jwt,
+                        payloadAnalysis = analysis
+                    )
+                } else cur
+            }
+        }
     }
 
     fun updateDecoderLabCrypto(
@@ -568,32 +583,35 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         keyIsHex: Boolean = _decoderLab.value.keyIsHex,
         mode: DecryptMode = _decoderLab.value.decryptMode
     ) {
-        _decoderLab.value = _decoderLab.value.copy(
-            keyInput = key,
-            ivInput = iv,
-            keyIsHex = keyIsHex,
-            decryptMode = mode
-        )
+        _decoderLab.update {
+            it.copy(
+                keyInput = key,
+                ivInput = iv,
+                keyIsHex = keyIsHex,
+                decryptMode = mode
+            )
+        }
     }
 
     fun runDecoderLabDecrypt() {
         val st = _decoderLab.value
         val targetHex = st.effectivePayloadHex.ifBlank { st.inputText }
-        val result = PayloadDecryptor.decrypt(
-            payloadHex = targetHex,
-            keyInput = st.keyInput,
-            ivInput = st.ivInput,
-            keyIsHex = st.keyIsHex,
-            mode = st.decryptMode
-        )
-        result.fold(
-            onSuccess = {
-                _decoderLab.value = st.copy(decryptedAnalysis = it, decryptError = null)
-            },
-            onFailure = {
-                _decoderLab.value = st.copy(decryptedAnalysis = null, decryptError = it.message ?: "Decryption failed")
+        decryptLabJob?.cancel()
+        decryptLabJob = viewModelScope.launch(Dispatchers.Default) {
+            val result = PayloadDecryptor.decrypt(
+                payloadHex = targetHex,
+                keyInput = st.keyInput,
+                ivInput = st.ivInput,
+                keyIsHex = st.keyIsHex,
+                mode = st.decryptMode
+            )
+            _decoderLab.update { cur ->
+                result.fold(
+                    onSuccess = { cur.copy(decryptedAnalysis = it, decryptError = null) },
+                    onFailure = { cur.copy(decryptedAnalysis = null, decryptError = it.message ?: "Decryption failed") }
+                )
             }
-        )
+        }
     }
 
     fun sendHexToDecoderLab(hex: String) {

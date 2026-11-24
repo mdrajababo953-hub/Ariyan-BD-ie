@@ -26,12 +26,14 @@ class InstalledAppsRepository(private val context: Context) {
             addCategory(Intent.CATEGORY_LAUNCHER)
         }
 
-        val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0L))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.queryIntentActivities(intent, 0)
-        }
+        val resolved = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0L))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(intent, 0)
+            }
+        }.getOrDefault(emptyList())
 
         val seenPackages = hashSetOf<String>()
         val result = mutableListOf<InstalledAppInfo>()
@@ -41,8 +43,9 @@ class InstalledAppsRepository(private val context: Context) {
             val pkg = activityInfo.packageName ?: continue
             if (pkg == context.packageName || !seenPackages.add(pkg)) continue
 
-            val appInfo = activityInfo.applicationInfo
-            val label = info.loadLabel(pm)?.toString()?.trim().takeUnless { it.isNullOrEmpty() } ?: pkg
+            val appInfo = activityInfo.applicationInfo ?: continue
+            val label = runCatching { info.loadLabel(pm)?.toString()?.trim() }.getOrNull()
+                .takeUnless { it.isNullOrEmpty() } ?: pkg
             val icon = runCatching { info.loadIcon(pm) }.getOrNull()
             val isGame = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 appInfo.category == ApplicationInfo.CATEGORY_GAME

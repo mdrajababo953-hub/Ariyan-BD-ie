@@ -25,6 +25,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.net.URI
 import java.util.concurrent.atomic.AtomicInteger
@@ -166,18 +167,18 @@ class LocalForwardProxyService : Service() {
 
                     if (!shouldSave) {
                         val skipped = skippedCounter.incrementAndGet()
-                        _runtimeState.value = _runtimeState.value.copy(
-                            skippedNonDecodableCount = skipped
-                        )
+                        _runtimeState.update { it.copy(skippedNonDecodableCount = skipped) }
                         return@LocalForwardProxyEngine
                     }
 
                     val count = capturedCounter.incrementAndGet()
                     val total = byteCounter.addAndGet((tx.bytesTx + tx.bytesRx).toLong())
-                    _runtimeState.value = _runtimeState.value.copy(
-                        capturedCount = count,
-                        totalBytes = total
-                    )
+                    _runtimeState.update {
+                        it.copy(
+                            capturedCount = count,
+                            totalBytes = total
+                        )
+                    }
                     if (count % 5 == 1) {
                         updateNotification(currentPort, currentForwardUrl, count)
                     }
@@ -247,10 +248,12 @@ class LocalForwardProxyService : Service() {
             val repo = (application as NetTraceApp).captureRepository
             scope.launch { repo.finishSession(finishedId) }
         }
-        _runtimeState.value = _runtimeState.value.copy(
-            isRunning = false,
-            sessionId = 0L
-        )
+        _runtimeState.update {
+            it.copy(
+                isRunning = false,
+                sessionId = 0L
+            )
+        }
         if (!keepForeground) {
             runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         }

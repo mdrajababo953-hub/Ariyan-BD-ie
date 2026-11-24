@@ -321,4 +321,17 @@ class PacketDecodersTest {
             db.close()
         }
     }
+
+    @Test
+    fun `payload analyzer caches quickClassify and bounds oversized hex inputs cleanly`() {
+        val sampleProto = "08f4f3c8cf3d102618ad02"
+        assertEquals(PayloadClassification.PROTOBUF, PayloadAnalyzer.quickClassify(sampleProto))
+        assertEquals(PayloadClassification.PROTOBUF, PayloadAnalyzer.quickClassify(sampleProto))
+
+        val hugeHex = "aa".repeat(200_000)
+        val hugeClass = PayloadAnalyzer.quickClassify(hugeHex)
+        assertEquals(PayloadClassification.ENCRYPTED_BLOCK, hugeClass)
+        val analysis = PayloadAnalyzer.analyze(hugeHex)
+        assertEquals(131_072, analysis.byteCount)
+    }
 }

@@ -2,8 +2,9 @@ package com.example.proxy
 
 import com.example.decoder.HexUtils
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.Headers
@@ -23,7 +24,10 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.GZIPInputStream
 import java.util.zip.Inflater
 import java.util.zip.InflaterInputStream
@@ -55,6 +59,7 @@ class LocalForwardProxyEngine(
 ) {
     companion object {
         const val MAX_CAPTURE_BYTES = 131_072
+        private const val MAX_COMPRESSED_CAPTURE_BYTES = 524_288
         private val HOP_BY_HOP_REQUEST_HEADERS = setOf(
             "host",
             "connection",
@@ -116,24 +121,40 @@ class LocalForwardProxyEngine(
     @Volatile
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
+    private val workerCounter = AtomicInteger(0)
+
+    @Volatile
+    private var workerExecutor: ExecutorService? = null
+
+    @Volatile
+    private var workerDispatcher: ExecutorCoroutineDispatcher? = null
 
     val boundPort: Int
         get() = serverSocket?.localPort ?: port
 
     fun start(scope: CoroutineScope): Int {
+        val exec = Executors.newCachedThreadPool { r ->
+            Thread(r, "nettrace-proxy-io-${workerCounter.incrementAndGet()}").apply {
+                isDaemon = true
+            }
+        }
+        val disp = exec.asCoroutineDispatcher()
+        workerExecutor = exec
+        workerDispatcher = disp
+
         val sock = ServerSocket().apply {
             reuseAddress = true
             bind(InetSocketAddress(InetAddress.getByName(bindAddress), port), 64)
         }
         serverSocket = sock
-        acceptJob = scope.launch(Dispatchers.IO) {
+        acceptJob = scope.launch(disp) {
             while (isActive && !sock.isClosed) {
                 val clientSock = try {
                     sock.accept()
                 } catch (_: Exception) {
                     break
                 }
-                launch(Dispatchers.IO) {
+                launch(disp) {
                     handleClientConnection(clientSock, scope)
                 }
             }
@@ -146,6 +167,10 @@ class LocalForwardProxyEngine(
         acceptJob = null
         runCatching { serverSocket?.close() }
         serverSocket = null
+        runCatching { workerDispatcher?.close() }
+        workerDispatcher = null
+        runCatching { workerExecutor?.shutdownNow() }
+        workerExecutor = null
     }
 
     private fun handleClientConnection(socket: Socket, scope: CoroutineScope) {
@@ -217,8 +242,8 @@ class LocalForwardProxyEngine(
                     val startMs = System.currentTimeMillis()
                     try {
                         client.newCall(okRequest).execute().use { resp ->
-                            val rawRespBytes = resp.body?.bytes() ?: ByteArray(0)
-                            val durationMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                            val respBody = resp.body
+                            val upstreamContentLength = respBody?.contentLength() ?: -1L
 
                             val respHeadersJson = JSONObject()
                             var respEncoding: String? = null
@@ -237,7 +262,17 @@ class LocalForwardProxyEngine(
                                     respHeaderLines.append("$k: $v\r\n")
                                 }
                             }
-                            respHeaderLines.append("Content-Length: ${rawRespBytes.size}\r\n")
+
+                            val hasBodyStream = respBody != null
+                            val useChunkedEncoding = hasBodyStream && upstreamContentLength < 0L
+                            if (!hasBodyStream) {
+                                respHeaderLines.append("Content-Length: 0\r\n")
+                            } else if (upstreamContentLength >= 0L) {
+                                respHeaderLines.append("Content-Length: $upstreamContentLength\r\n")
+                            } else {
+                                respHeaderLines.append("Transfer-Encoding: chunked\r\n")
+                            }
+
                             val shouldClose = parsedReq.connectionClose
                             respHeaderLines.append(
                                 if (shouldClose) "Connection: close\r\n\r\n" else "Connection: keep-alive\r\n\r\n"
@@ -245,13 +280,46 @@ class LocalForwardProxyEngine(
 
                             val respHeaderBytes = respHeaderLines.toString().toByteArray(Charsets.ISO_8859_1)
                             output.write(respHeaderBytes)
-                            if (rawRespBytes.isNotEmpty()) {
-                                output.write(rawRespBytes)
-                            }
                             output.flush()
 
+                            val isCompressed = !respEncoding.isNullOrBlank() &&
+                                (respEncoding.contains("gzip", true) || respEncoding.contains("deflate", true))
+                            val captureCap = if (isCompressed) MAX_COMPRESSED_CAPTURE_BYTES else MAX_CAPTURE_BYTES
+                            val capturedRespBuf = ByteArrayOutputStream(minOf(4096, captureCap))
+                            var totalBodyBytesRx = 0L
+
+                            if (respBody != null) {
+                                val streamBuf = ByteArray(16384)
+                                respBody.byteStream().use { bodyIn ->
+                                    while (true) {
+                                        val n = bodyIn.read(streamBuf)
+                                        if (n <= 0) break
+                                        totalBodyBytesRx += n
+                                        if (useChunkedEncoding) {
+                                            output.write(
+                                                "${n.toString(16)}\r\n".toByteArray(Charsets.ISO_8859_1)
+                                            )
+                                            output.write(streamBuf, 0, n)
+                                            output.write("\r\n".toByteArray(Charsets.ISO_8859_1))
+                                        } else {
+                                            output.write(streamBuf, 0, n)
+                                        }
+                                        val room = captureCap - capturedRespBuf.size()
+                                        if (room > 0) {
+                                            capturedRespBuf.write(streamBuf, 0, minOf(n, room))
+                                        }
+                                    }
+                                }
+                                if (useChunkedEncoding) {
+                                    output.write("0\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+                                }
+                                output.flush()
+                            }
+
+                            val durationMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                            val rawRespSample = capturedRespBuf.toByteArray()
                             val decodedReq = decompressIfNeeded(reqBodyBytes, reqEncoding)
-                            val decodedResp = decompressIfNeeded(rawRespBytes, respEncoding)
+                            val decodedResp = decompressIfNeeded(rawRespSample, respEncoding)
 
                             onTransaction(
                                 CapturedProxyTransaction(
@@ -268,7 +336,8 @@ class LocalForwardProxyEngine(
                                     responseHeadersJson = respHeadersJson.toString(),
                                     responseBodyHex = cappedHex(decodedResp),
                                     bytesTx = headerBytes.size + reqBodyBytes.size,
-                                    bytesRx = respHeaderBytes.size + rawRespBytes.size,
+                                    bytesRx = (respHeaderBytes.size + totalBodyBytesRx)
+                                        .coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                                     durationMs = durationMs
                                 )
                             )
@@ -431,15 +500,27 @@ class LocalForwardProxyEngine(
         val enc = encoding.lowercase(Locale.US)
         return when {
             enc.contains("gzip") -> runCatching {
-                GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+                GZIPInputStream(ByteArrayInputStream(bytes)).use { readBounded(it, MAX_CAPTURE_BYTES) }
             }.getOrDefault(bytes)
             enc.contains("deflate") -> runCatching {
-                InflaterInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+                InflaterInputStream(ByteArrayInputStream(bytes)).use { readBounded(it, MAX_CAPTURE_BYTES) }
             }.recoverCatching {
-                InflaterInputStream(ByteArrayInputStream(bytes), Inflater(true)).use { it.readBytes() }
+                InflaterInputStream(ByteArrayInputStream(bytes), Inflater(true)).use { readBounded(it, MAX_CAPTURE_BYTES) }
             }.getOrDefault(bytes)
             else -> bytes
         }
+    }
+
+    private fun readBounded(input: InputStream, maxBytes: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(4096)
+        while (out.size() < maxBytes) {
+            val toRead = minOf(buf.size, maxBytes - out.size())
+            val n = runCatching { input.read(buf, 0, toRead) }.getOrDefault(-1)
+            if (n <= 0) break
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 
     private fun cappedHex(bytes: ByteArray): String {

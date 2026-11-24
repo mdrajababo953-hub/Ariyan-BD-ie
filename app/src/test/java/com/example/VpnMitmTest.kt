@@ -467,4 +467,84 @@ class VpnMitmTest {
 
         assertEquals("01020304050607", HexUtils.bytesToHex(appReply.toByteArray()))
     }
+
+    @Test
+    fun `local forward proxy forwards game request preserves headers and decompresses gzip protobuf response`() = runTest {
+        val upstreamSock = java.net.ServerSocket(0, 4, java.net.InetAddress.getLoopbackAddress())
+        val expectedRespBytes = HexUtils.hexToBytes("08f4f3c8cf3d")
+        val gzippedResp = ByteArrayOutputStream().apply {
+            GZIPOutputStream(this).use { it.write(expectedRespBytes) }
+        }.toByteArray()
+
+        val upstreamReceivedHeaders = StringBuilder()
+        val upstreamJob = launch(Dispatchers.IO) {
+            upstreamSock.accept().use { conn ->
+                val inp = conn.getInputStream()
+                val out = conn.getOutputStream()
+                val buf = ByteArray(4096)
+                val readLen = inp.read(buf)
+                upstreamReceivedHeaders.append(String(buf, 0, readLen.coerceAtLeast(0), Charsets.ISO_8859_1))
+
+                val replyHeader = (
+                    "HTTP/1.1 200 OK\r\n" +
+                        "Content-Type: application/x-protobuf\r\n" +
+                        "Content-Encoding: gzip\r\n" +
+                        "Content-Length: ${gzippedResp.size}\r\n" +
+                        "Connection: close\r\n\r\n"
+                    ).toByteArray(Charsets.ISO_8859_1)
+                out.write(replyHeader)
+                out.write(gzippedResp)
+                out.flush()
+            }
+        }
+
+        val captured = java.util.concurrent.CopyOnWriteArrayList<com.example.proxy.CapturedProxyTransaction>()
+        val proxyScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        val engine = com.example.proxy.LocalForwardProxyEngine(
+            port = 0,
+            forwardBaseUrl = "http://127.0.0.1:${upstreamSock.localPort}",
+            bindAddress = "127.0.0.1"
+        ) { tx ->
+            captured.add(tx)
+        }
+        val proxyPort = engine.start(proxyScope)
+
+        val clientResponseText = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            java.net.Socket("127.0.0.1", proxyPort).use { client ->
+                client.soTimeout = 5000
+                val out = client.getOutputStream()
+                val reqBytes = HexUtils.hexToBytes("0801")
+                val rawReq = (
+                    "POST /GetLoginData HTTP/1.1\r\n" +
+                        "Host: 127.0.0.1:$proxyPort\r\n" +
+                        "User-Agent: UnityPlayer/2022.3.47f1\r\n" +
+                        "Accept-Encoding: deflate, gzip\r\n" +
+                        "Releaseversion: OB54\r\n" +
+                        "Content-Length: ${reqBytes.size}\r\n" +
+                        "Connection: close\r\n\r\n"
+                    ).toByteArray(Charsets.ISO_8859_1) + reqBytes
+                out.write(rawReq)
+                out.flush()
+
+                String(client.getInputStream().readBytes(), Charsets.ISO_8859_1)
+            }
+        }
+
+        upstreamJob.join()
+        engine.stop()
+        upstreamSock.close()
+
+        assertTrue(upstreamReceivedHeaders.contains("POST /GetLoginData HTTP/1.1"))
+        assertTrue(upstreamReceivedHeaders.contains("Releaseversion: OB54"))
+        assertTrue(clientResponseText.startsWith("HTTP/1.1 200 OK"))
+
+        assertEquals(1, captured.size)
+        val tx = captured.first()
+        assertEquals("POST", tx.method)
+        assertEquals("/GetLoginData", tx.path)
+        assertEquals(200, tx.statusCode)
+        assertEquals("0801", tx.requestBodyHex)
+        assertEquals("08f4f3c8cf3d", tx.responseBodyHex)
+        assertTrue(com.example.decoder.PayloadAnalyzer.hasDecodablePayload(tx.requestBodyHex, tx.responseBodyHex))
+    }
 }

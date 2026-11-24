@@ -34,6 +34,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
@@ -58,10 +61,10 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.db.CapturedPacketEntity
 import com.example.decoder.DecryptMode
+import com.example.decoder.HexUtils
 import com.example.decoder.JwtDecodeResult
 import com.example.decoder.JwtDecoder
 import com.example.decoder.PacketJsonSerializer
-import com.example.decoder.PacketRawFormatter
 import com.example.decoder.PayloadAnalysis
 import com.example.decoder.PayloadAnalyzer
 import com.example.decoder.PayloadClassification
@@ -814,45 +817,109 @@ private fun HeadersAndHexTabContent(
     onCopyToast: (String) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
-    val rawDump = remember(packet) { PacketRawFormatter.formatPacket(packet) }
+    var showResponse by remember(packet.id) { mutableStateOf(false) }
+    var showHeadersOnly by remember(packet.id) { mutableStateOf(false) }
+    var spacedHex by remember(packet.id) { mutableStateOf(true) }
 
-    LazyColumn(
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        modifier = Modifier.fillMaxSize()
-    ) {
-        item {
-            PythonFieldsCodeBlock(
-                code = rawDump,
-                title = "Captured Raw Dump (Method, Headers, Hex)",
-                onCopy = { onCopyToast("Raw packet dump copied") }
-            )
-        }
-        item {
-            HeadersCard(title = "Request Headers (${reqHeaders.size})", headers = reqHeaders)
-        }
-        item {
-            HexBlockCard(
-                title = "Request Body Hex (${reqAnalysis.byteCount}B)",
-                rawHex = packet.requestBodyHex,
-                onCopyHex = {
-                    clipboard.setText(AnnotatedString(packet.requestBodyHex))
-                    onCopyToast("Request hex copied")
+    val activeHex = if (showResponse) packet.responseBodyHex else packet.requestBodyHex
+    val activeAnalysis = if (showResponse) respAnalysis else reqAnalysis
+    val activeHeaders = if (showResponse) respHeaders else reqHeaders
+    val formattedBody = remember(activeHex, spacedHex) {
+        if (spacedHex) HexUtils.formatSpacedHex(activeHex)
+        else HexUtils.sanitizeHex(activeHex).uppercase().ifBlank { "<Empty Body>" }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            item {
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = !showHeadersOnly,
+                        onClick = { showHeadersOnly = false },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                    ) {
+                        Text("BODY (${activeAnalysis.byteCount}B)")
+                    }
+                    SegmentedButton(
+                        selected = showHeadersOnly,
+                        onClick = { showHeadersOnly = true },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                    ) {
+                        Text("HEADERS (${activeHeaders.size})")
+                    }
                 }
-            )
-        }
-        item {
-            HeadersCard(title = "Response Headers (${respHeaders.size})", headers = respHeaders)
-        }
-        item {
-            HexBlockCard(
-                title = "Response Body Hex (${respAnalysis.byteCount}B)",
-                rawHex = packet.responseBodyHex,
-                onCopyHex = {
-                    clipboard.setText(AnnotatedString(packet.responseBodyHex))
-                    onCopyToast("Response hex copied")
+            }
+
+            if (showHeadersOnly) {
+                item {
+                    HeadersCard(
+                        title = if (showResponse) "Response Headers (${respHeaders.size})"
+                        else "Request Headers (${reqHeaders.size})",
+                        headers = activeHeaders
+                    )
                 }
-            )
+            } else {
+                item {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        FilterChip(
+                            selected = spacedHex,
+                            onClick = { spacedHex = true },
+                            label = { Text("Format: Hex (Spaced)") }
+                        )
+                        FilterChip(
+                            selected = !spacedHex,
+                            onClick = { spacedHex = false },
+                            label = { Text("Raw Hex") }
+                        )
+                    }
+                }
+                item {
+                    HexBlockCard(
+                        title = if (showResponse) "Response Body (${respAnalysis.byteCount}B)"
+                        else "Request Body (${reqAnalysis.byteCount}B)",
+                        displayHex = formattedBody,
+                        hasBytes = activeHex.isNotBlank(),
+                        onCopyHex = {
+                            clipboard.setText(AnnotatedString(formattedBody))
+                            onCopyToast(if (showResponse) "Response hex copied" else "Request hex copied")
+                        }
+                    )
+                }
+            }
+        }
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+        SingleChoiceSegmentedButtonRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .testTag("detail_request_response_switch")
+        ) {
+            SegmentedButton(
+                selected = !showResponse,
+                onClick = { showResponse = false },
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+            ) {
+                Text("REQUEST")
+            }
+            SegmentedButton(
+                selected = showResponse,
+                onClick = { showResponse = true },
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+            ) {
+                Text("RESPONSE")
+            }
         }
     }
 }
@@ -902,7 +969,8 @@ private fun HeadersCard(title: String, headers: Map<String, String>) {
 @Composable
 private fun HexBlockCard(
     title: String,
-    rawHex: String,
+    displayHex: String,
+    hasBytes: Boolean,
     onCopyHex: () -> Unit
 ) {
     Surface(
@@ -917,7 +985,7 @@ private fun HexBlockCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                if (rawHex.isNotEmpty()) {
+                if (hasBytes) {
                     IconButton(onClick = onCopyHex, modifier = Modifier.size(36.dp)) {
                         Icon(
                             AppIcons.ContentCopy,
@@ -936,11 +1004,11 @@ private fun HexBlockCard(
                         MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                         RoundedCornerShape(10.dp)
                     )
-                    .padding(10.dp)
+                    .padding(12.dp)
             ) {
                 SelectionContainer {
                     Text(
-                        text = rawHex.ifBlank { "<Empty Body>" },
+                        text = displayHex.ifBlank { "<Empty Body>" },
                         style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
                         color = MaterialTheme.colorScheme.onSurface
                     )

@@ -277,4 +277,48 @@ class PacketDecodersTest {
         assertEquals(16541432308L, protoObj.getJSONObject("request").getJSONObject("decoded").getLong("field_1"))
         assertEquals(38L, protoObj.getJSONObject("request").getJSONObject("decoded").getLong("field_2"))
     }
+
+    @Test
+    fun `formatSpacedHex produces uppercase spaced hex without offsets`() {
+        val spaced = HexUtils.formatSpacedHex("12cf1d0a020801")
+        assertEquals("12 CF 1D 0A 02 08 01", spaced)
+        assertTrue(!spaced.contains("|"))
+        assertTrue(!spaced.contains("0000"))
+    }
+
+    @Test
+    fun `hasDecodablePayload accepts when either request or response decodes to protobuf or json`() {
+        val enc16 = "9b886fb750efb187097dbbb281be7bae"
+        val proto = "08f4f3c8cf3d1026"
+        val jsonHex = HexUtils.bytesToHex("{\"uid\":123}".toByteArray())
+
+        // Both undecodable -> false
+        assertTrue(!PayloadAnalyzer.hasDecodablePayload(enc16, enc16))
+        assertTrue(!PayloadAnalyzer.hasDecodablePayload("", ""))
+
+        // Either request OR response decodable -> true
+        assertTrue(PayloadAnalyzer.hasDecodablePayload(enc16, proto))
+        assertTrue(PayloadAnalyzer.hasDecodablePayload(proto, enc16))
+        assertTrue(PayloadAnalyzer.hasDecodablePayload(jsonHex, ""))
+    }
+
+    @Test
+    fun `app starts clean with zero pre-seeded sample sessions`() = kotlinx.coroutines.test.runTest {
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(
+            ctx,
+            com.example.data.db.NetTraceDatabase::class.java
+        ).allowMainThreadQueries().build()
+        try {
+            val seeded = com.example.data.SampleDataSeeder.seedIfEmpty(
+                db.sessionDao(),
+                db.packetDao(),
+                db.ruleDao()
+            )
+            assertEquals(null, seeded)
+            assertEquals(0, db.sessionDao().getSessionCount())
+        } finally {
+            db.close()
+        }
+    }
 }

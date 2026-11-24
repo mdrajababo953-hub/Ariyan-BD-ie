@@ -56,6 +56,26 @@ object HexUtils {
         }
     }
 
+    fun formatSpacedHex(hexInput: String, maxBytes: Int = 16384): String {
+        val clean = sanitizeHex(hexInput)
+        if (clean.length < 2) return "<Empty Body>"
+        val evenLen = clean.length - (clean.length % 2)
+        val totalBytes = evenLen / 2
+        val limitBytes = minOf(totalBytes, maxBytes)
+        val upper = clean.uppercase(Locale.US)
+        val sb = StringBuilder(limitBytes * 3)
+        for (i in 0 until limitBytes) {
+            if (i > 0) sb.append(' ')
+            val pos = i * 2
+            sb.append(upper[pos])
+            sb.append(upper[pos + 1])
+        }
+        if (totalBytes > maxBytes) {
+            sb.append("\n... (${totalBytes - maxBytes} more bytes truncated)")
+        }
+        return sb.toString()
+    }
+
     fun toBase64(bytes: ByteArray): String {
         if (bytes.isEmpty()) return ""
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
@@ -401,8 +421,9 @@ object PayloadAnalyzer {
         val textCandidate = tryReadableUtf8(bytes)
         if (textCandidate != null) {
             val trimmed = textCandidate.trim()
-            if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-                (trimmed.startsWith("[") && trimmed.endsWith("]"))
+            if (((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+                    (trimmed.startsWith("[") && trimmed.endsWith("]"))) &&
+                tryFormatJson(trimmed) != null
             ) {
                 return PayloadClassification.JSON
             }
@@ -417,6 +438,15 @@ object PayloadAnalyzer {
             return PayloadClassification.ENCRYPTED_BLOCK
         }
         return PayloadClassification.RAW_BINARY
+    }
+
+    fun isStructuredDecodable(hexInput: String): Boolean {
+        val cls = quickClassify(hexInput)
+        return cls == PayloadClassification.PROTOBUF || cls == PayloadClassification.JSON
+    }
+
+    fun hasDecodablePayload(requestBodyHex: String, responseBodyHex: String): Boolean {
+        return isStructuredDecodable(requestBodyHex) || isStructuredDecodable(responseBodyHex)
     }
 
     fun analyze(hexInput: String): PayloadAnalysis {

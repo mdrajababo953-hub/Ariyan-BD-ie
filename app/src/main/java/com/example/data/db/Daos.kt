@@ -48,6 +48,12 @@ interface CaptureSessionDao {
 
     @Query("DELETE FROM capture_sessions WHERE id = :sessionId")
     suspend fun deleteSession(sessionId: Long)
+
+    @Query("DELETE FROM capture_sessions WHERE isSample = 1")
+    suspend fun deleteSampleSessions()
+
+    @Query("UPDATE capture_sessions SET packetCount = 0, blockedCount = 0, totalBytes = 0 WHERE id = :sessionId")
+    suspend fun resetSessionStats(sessionId: Long)
 }
 
 @Dao

@@ -108,6 +108,7 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
     val context = LocalContext.current
     val settings by vm.settings.collectAsStateWithLifecycle()
     val vpnState by vm.vpnState.collectAsStateWithLifecycle()
+    val proxyState by vm.proxyState.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val activeSession by vm.activeSession.collectAsStateWithLifecycle()
     val packets by vm.filteredPackets.collectAsStateWithLifecycle()
@@ -158,11 +159,19 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
         }
     }
 
+    var pendingStartMode by remember { mutableStateOf<com.example.data.prefs.CaptureEngineMode?>(null) }
+    var pendingProxyPort by remember { mutableStateOf(8080) }
+    var pendingProxyUrl by remember { mutableStateOf("") }
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) {
-        // Start VPN regardless; notification permission only affects status bar visibility
-        launchVpnCapture()
+        if (pendingStartMode == com.example.data.prefs.CaptureEngineMode.LOCAL_PROXY) {
+            vm.startLocalProxy(pendingProxyPort, pendingProxyUrl)
+        } else {
+            launchVpnCapture()
+        }
+        pendingStartMode = null
     }
 
     val caInstallLauncher = rememberLauncherForActivityResult(
@@ -190,9 +199,23 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
+            pendingStartMode = com.example.data.prefs.CaptureEngineMode.APP_VPN
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             launchVpnCapture()
+        }
+    }
+
+    val startProxyWithPermissions: (Int, String) -> Unit = { port, url ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingStartMode = com.example.data.prefs.CaptureEngineMode.LOCAL_PROXY
+            pendingProxyPort = port
+            pendingProxyUrl = url
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            vm.startLocalProxy(port, url)
         }
     }
 
@@ -245,7 +268,10 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                         text = stringResource(R.string.app_name),
                                         style = MaterialTheme.typography.titleLarge
                                     )
-                                    if (vpnState.isRunning) {
+                                    if (proxyState.isRunning) {
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        TagChip(text = "PROXY :${proxyState.port}", color = EmeraldPulse)
+                                    } else if (vpnState.isRunning) {
                                         Spacer(modifier = Modifier.width(10.dp))
                                         TagChip(text = "VPN ACTIVE", color = EmeraldPulse)
                                     }
@@ -394,6 +420,11 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                             when (currentTab) {
                                 MainTab.CAPTURE -> CaptureDashboardScreen(
+                                    captureMode = settings.captureMode,
+                                    proxyPort = settings.proxyPort,
+                                    forwardBaseUrl = settings.forwardBaseUrl,
+                                    onlyDecodableHttp = settings.onlyDecodableHttp,
+                                    proxyState = proxyState,
                                     targetApp = settings.targetApp,
                                     targetAppInfo = targetAppInfo,
                                     vpnState = vpnState,
@@ -404,6 +435,13 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                     activeFilter = filterChip,
                                     httpsMitmEnabled = settings.httpsMitmEnabled,
                                     caReady = caReady,
+                                    onModeChange = vm::setCaptureMode,
+                                    onStartLocalProxy = startProxyWithPermissions,
+                                    onStopLocalProxy = vm::stopLocalProxy,
+                                    onUpdateForwardUrl = vm::setForwardBaseUrl,
+                                    onUpdateProxyPort = vm::setProxyPort,
+                                    onToggleOnlyDecodable = vm::toggleOnlyDecodableHttp,
+                                    onClearPackets = vm::clearActiveSessionPackets,
                                     onToggleHttpsMitm = vm::toggleHttpsMitm,
                                     onInstallCaCert = launchCaInstall,
                                     onSaveCaCert = vm::saveCaCertToAryan,

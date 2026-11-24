@@ -22,6 +22,10 @@ import com.example.decoder.PayloadAnalysis
 import com.example.decoder.PayloadAnalyzer
 import com.example.decoder.PayloadClassification
 import com.example.decoder.PayloadDecryptor
+import com.example.data.prefs.CaptureEngineMode
+import com.example.proxy.LocalForwardProxyEngine
+import com.example.proxy.LocalForwardProxyService
+import com.example.proxy.LocalProxyRuntimeState
 import com.example.ui.theme.AppAccentTheme
 import com.example.vpn.NetTraceVpnService
 import com.example.vpn.VpnRuntimeState
@@ -89,6 +93,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     )
 
     val vpnState: StateFlow<VpnRuntimeState> = NetTraceVpnService.runtimeState
+    val proxyState: StateFlow<LocalProxyRuntimeState> = LocalForwardProxyService.runtimeState
 
     val sessions: StateFlow<List<CaptureSessionEntity>> = repo.observeAllSessions().stateIn(
         scope = viewModelScope,
@@ -144,9 +149,11 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     val activeSession: StateFlow<CaptureSessionEntity?> = combine(
         _selectedSessionId,
         sessions,
-        vpnState
-    ) { chosenId, allSessions, vpn ->
+        vpnState,
+        proxyState
+    ) { chosenId, allSessions, vpn, proxy ->
         val effectiveId = when {
+            proxy.isRunning && proxy.sessionId != 0L -> proxy.sessionId
             vpn.isRunning && vpn.sessionId != 0L -> vpn.sessionId
             chosenId != 0L -> chosenId
             else -> allSessions.firstOrNull()?.id ?: 0L
@@ -299,6 +306,64 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun setCaptureMode(mode: CaptureEngineMode) {
+        viewModelScope.launch {
+            prefs.setCaptureMode(mode)
+        }
+    }
+
+    fun setForwardBaseUrl(url: String) {
+        viewModelScope.launch {
+            prefs.setForwardBaseUrl(url)
+        }
+    }
+
+    fun setProxyPort(portText: String) {
+        val parsed = portText.filter { it.isDigit() }.toIntOrNull() ?: return
+        if (parsed in 1024..65535) {
+            viewModelScope.launch {
+                prefs.setProxyPort(parsed)
+            }
+        }
+    }
+
+    fun toggleOnlyDecodableHttp(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setOnlyDecodableHttp(enabled)
+        }
+    }
+
+    fun startLocalProxy(portOverride: Int? = null, urlOverride: String? = null) {
+        val current = settings.value
+        val port = (portOverride ?: current.proxyPort).coerceIn(1024, 65535)
+        val rawUrl = urlOverride ?: current.forwardBaseUrl
+        val cleanUrl = LocalForwardProxyEngine.sanitizeBaseUrl(rawUrl)
+        viewModelScope.launch {
+            prefs.setProxyPort(port)
+            prefs.setForwardBaseUrl(cleanUrl)
+        }
+        LocalForwardProxyService.startProxy(
+            context = app,
+            port = port,
+            forwardUrl = cleanUrl,
+            onlyDecodable = current.onlyDecodableHttp
+        )
+    }
+
+    fun stopLocalProxy() {
+        LocalForwardProxyService.stopProxy(app)
+        _snackbarMessage.value = "Local proxy stopped."
+    }
+
+    fun clearActiveSessionPackets() {
+        val session = activeSession.value ?: return
+        viewModelScope.launch {
+            repo.clearSessionPackets(session.id)
+            _selectedPacketId.value = null
+            _snackbarMessage.value = "Captured traffic cleared."
+        }
+    }
+
     fun startVpnCapture() {
         val target = settings.value.targetApp
         if (target.packageName.isBlank()) {
@@ -309,7 +374,8 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
             context = app,
             packageName = target.packageName,
             appName = target.appName,
-            mitmEnabled = settings.value.httpsMitmEnabled
+            mitmEnabled = settings.value.httpsMitmEnabled,
+            onlyDecodableHttp = settings.value.onlyDecodableHttp
         )
     }
 

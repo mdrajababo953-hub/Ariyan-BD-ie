@@ -55,6 +55,11 @@ class CaptureRepository(private val db: NetTraceDatabase) {
         sessionDao.deleteSession(sessionId)
     }
 
+    suspend fun clearSessionPackets(sessionId: Long) {
+        packetDao.clearSessionPackets(sessionId)
+        sessionDao.resetSessionStats(sessionId)
+    }
+
     suspend fun recordCapturedPacket(packet: CapturedPacketEntity): Long {
         val id = packetDao.insertPacket(packet)
         val deltaBytes = (packet.bytesTx + packet.bytesRx).toLong()

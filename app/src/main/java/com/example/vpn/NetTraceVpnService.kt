@@ -73,6 +73,7 @@ class NetTraceVpnService : VpnService() {
         const val EXTRA_PACKAGE = "extra_package"
         const val EXTRA_APP_NAME = "extra_app_name"
         const val EXTRA_MITM_ENABLED = "extra_mitm_enabled"
+        const val EXTRA_ONLY_DECODABLE = "extra_only_decodable"
         const val CHANNEL_ID = "nettrace_vpn_channel"
         const val NOTIF_ID = 4041
 
@@ -93,13 +94,15 @@ class NetTraceVpnService : VpnService() {
             context: Context,
             packageName: String,
             appName: String,
-            mitmEnabled: Boolean = true
+            mitmEnabled: Boolean = true,
+            onlyDecodableHttp: Boolean = true
         ) {
             val intent = Intent(context, NetTraceVpnService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_PACKAGE, packageName)
                 putExtra(EXTRA_APP_NAME, appName)
                 putExtra(EXTRA_MITM_ENABLED, mitmEnabled)
+                putExtra(EXTRA_ONLY_DECODABLE, onlyDecodableHttp)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -134,6 +137,9 @@ class NetTraceVpnService : VpnService() {
 
     @Volatile
     private var mitmEnabled: Boolean = true
+
+    @Volatile
+    private var onlyDecodableHttp: Boolean = true
 
     @Volatile
     private var caTrustedByDevice: Boolean = false
@@ -220,6 +226,7 @@ class NetTraceVpnService : VpnService() {
                 val pkg = intent.getStringExtra(EXTRA_PACKAGE).orEmpty()
                 val label = intent.getStringExtra(EXTRA_APP_NAME).orEmpty().ifBlank { pkg }
                 val enableMitm = intent.getBooleanExtra(EXTRA_MITM_ENABLED, true)
+                val onlyDecodable = intent.getBooleanExtra(EXTRA_ONLY_DECODABLE, true)
                 startForegroundWithNotification(label.ifBlank { "Target App" }, 0)
                 if (pkg.isBlank()) {
                     _runtimeState.value = VpnRuntimeState(errorMessage = "No target app selected.")
@@ -227,6 +234,7 @@ class NetTraceVpnService : VpnService() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                onlyDecodableHttp = onlyDecodable
                 startVpnEngine(pkg, label, enableMitm)
             }
         }
@@ -490,27 +498,6 @@ class NetTraceVpnService : VpnService() {
                         tunWriteChannel.send(replyIp)
                         val total = byteCounter.addAndGet(data.size.toLong())
                         _runtimeState.value = _runtimeState.value.copy(totalBytes = total)
-
-                        val sid = activeSessionId
-                        val shouldUpdateDb = isDns || (now - flowHolder.lastDbUpdatedAt) >= 1000L
-                        if (sid != 0L && flowHolder.lastPacketId != 0L && shouldUpdateDb) {
-                            flowHolder.lastDbUpdatedAt = now
-                            val pid = flowHolder.lastPacketId
-                            val rxTotal = flowHolder.totalRx
-                            val respHex = cappedHex(data)
-                            enqueueDbWrite {
-                                (application as NetTraceApp).captureRepository.updateCapturedPacketResponse(
-                                    sessionId = sid,
-                                    packetId = pid,
-                                    statusCode = if (isDns) 200 else null,
-                                    responseHeadersJson = answerHeaders,
-                                    responseBodyHex = respHex,
-                                    totalBytesRx = rxTotal,
-                                    addedBytesRx = data.size,
-                                    durationMs = (System.currentTimeMillis() - flowHolder.lastActivityAt).coerceAtLeast(1L)
-                                )
-                            }
-                        }
                     } catch (_: Exception) {
                         break
                     }
@@ -539,35 +526,8 @@ class NetTraceVpnService : VpnService() {
             udpFlow.socket.send(DatagramPacket(udp.payload, udp.payload.size, destAddr, udp.dstPort))
         }
 
-        val shouldRecordTx = isDns || udpFlow.lastDbRecordedAt == 0L || (now - udpFlow.lastDbRecordedAt) >= 1000L
-        if (shouldRecordTx) {
-            udpFlow.lastDbRecordedAt = now
-            recordPacket(
-                method = protoLabel,
-                url = if (dnsQuery != null) "dns://$displayHost" else "udp://$displayHost:${udp.dstPort}",
-                host = displayHost,
-                path = if (dnsQuery != null) "/$dnsQuery" else "/",
-                port = udp.dstPort,
-                protocol = protoLabel,
-                statusCode = null,
-                reqHeadersJson = JSONObject()
-                    .put("Dst-IP", ip.dstIpStr)
-                    .put("Src-Port", udp.srcPort)
-                    .toString(),
-                reqHex = cappedHex(udp.payload),
-                respHex = "",
-                durationMs = 1L,
-                bytesTx = udp.payload.size,
-                bytesRx = 0,
-                isBlocked = false,
-                blockReason = null,
-                ruleId = if (matchedRule?.action == "HIGHLIGHT") matchedRule.id else null,
-                onInserted = { id -> udpFlow.lastPacketId = id }
-            )
-        } else {
-            val total = byteCounter.addAndGet(udp.payload.size.toLong())
-            _runtimeState.value = _runtimeState.value.copy(totalBytes = total)
-        }
+        val total = byteCounter.addAndGet(udp.payload.size.toLong())
+        _runtimeState.value = _runtimeState.value.copy(totalBytes = total)
     }
 
     private fun handleTcpPacket(raw: ByteArray, ip: Ipv4Header) {
@@ -1020,36 +980,12 @@ class NetTraceVpnService : VpnService() {
                         port = session.serverPort,
                         callbacks = createCallbacks(session)
                     )
-                } catch (tlsErr: Exception) {
+                } catch (_: Exception) {
                     // App rejected our leaf cert (User CA not installed/trusted or SSL Certificate Pinning).
-                    // Record diagnostic packet and auto-bypass future connections to this host!
+                    // Auto-bypass future connections to this host so game stays online seamlessly.
                     pinningBypassedHosts.add(hostKey)
                     _runtimeState.value = _runtimeState.value.copy(
                         pinningBypassCount = pinningBypassedHosts.size
-                    )
-                    recordPacket(
-                        method = "TLS_PIN",
-                        url = "https://${session.hostName}/ClientHello",
-                        host = session.hostName,
-                        path = "/ClientHello",
-                        port = session.serverPort,
-                        protocol = "HTTPS",
-                        statusCode = 495,
-                        reqHeadersJson = JSONObject()
-                            .put("SNI", session.hostName)
-                            .put("Dst-IP", session.serverIpStr)
-                            .put("MITM-Status", "Auto-bypassed to passthrough")
-                            .put("Reason", tlsErr.message ?: tlsErr.javaClass.simpleName)
-                            .put("Hint", "Install NetTrace CA cert or target app enforces SSL Pinning")
-                            .toString(),
-                        reqHex = cappedHex(firstBytes),
-                        respHex = "",
-                        durationMs = (System.currentTimeMillis() - session.startedAt).coerceAtLeast(1L),
-                        bytesTx = firstBytes.size,
-                        bytesRx = 0,
-                        isBlocked = false,
-                        blockReason = null,
-                        ruleId = null
                     )
                 } finally {
                     runCatching { clientTls?.close() }
@@ -1101,6 +1037,10 @@ class NetTraceVpnService : VpnService() {
     private fun createCallbacks(session: TcpFlowSession): HttpCaptureCallbacks {
         return object : HttpCaptureCallbacks {
             override fun onHttpRequest(meta: CapturedHttpRequestMeta) {
+                if (onlyDecodableHttp) {
+                    // Defer saving until response arrives so only decodable HTTP pairs are recorded
+                    return
+                }
                 val matched = matchTrafficRule(meta.host, meta.path, meta.port, meta.protocol)
                 recordPacket(
                     method = meta.method,
@@ -1133,6 +1073,14 @@ class NetTraceVpnService : VpnService() {
             ) {
                 val sid = activeSessionId
                 if (sid == 0L) return
+
+                if (onlyDecodableHttp &&
+                    !com.example.decoder.PayloadAnalyzer.hasDecodablePayload(meta.requestBodyHex, responseBodyHex)
+                ) {
+                    return
+                }
+
+                val matched = matchTrafficRule(meta.host, meta.path, meta.port, meta.protocol)
                 enqueueDbWrite {
                     val pid = meta.packetIdHolder.packetId
                     val repo = (application as NetTraceApp).captureRepository
@@ -1148,7 +1096,19 @@ class NetTraceVpnService : VpnService() {
                             durationMs = durationMs
                         )
                     } else {
-                        val fallbackId = repo.recordCapturedPacket(
+                        val count = packetCounter.incrementAndGet()
+                        val total = byteCounter.addAndGet((meta.bytesTx + bytesRx).toLong())
+                        _runtimeState.value = _runtimeState.value.copy(
+                            packetCount = count,
+                            totalBytes = total
+                        )
+                        if (count % 5 == 1) {
+                            updateNotification(currentTargetLabel, count)
+                        }
+                        if (matched?.action == "HIGHLIGHT") {
+                            repo.incrementRuleHit(matched.id)
+                        }
+                        val insertedId = repo.recordCapturedPacket(
                             CapturedPacketEntity(
                                 sessionId = sid,
                                 timestamp = meta.startedAt,
@@ -1170,7 +1130,7 @@ class NetTraceVpnService : VpnService() {
                                 blockReason = null
                             )
                         )
-                        meta.packetIdHolder.packetId = fallbackId
+                        meta.packetIdHolder.packetId = insertedId
                     }
                 }
             }
@@ -1182,90 +1142,8 @@ class NetTraceVpnService : VpnService() {
                 reqBytes: ByteArray?,
                 respBytes: ByteArray?
             ) {
-                val sid = activeSessionId
-                if (sid == 0L) return
-                var insertNow = false
-                var snapshotReqHex = ""
-                var snapshotRespHex = ""
-                var totalTx = 0
-                var totalRx = 0
-                var addedRx = 0
-
-                synchronized(session.rawLock) {
-                    if (reqBytes != null && reqBytes.isNotEmpty()) {
-                        session.rawTxBytes += reqBytes.size
-                        appendBounded(session.rawReqBuf, reqBytes)
-                    }
-                    if (respBytes != null && respBytes.isNotEmpty()) {
-                        session.rawRxBytes += respBytes.size
-                        addedRx = respBytes.size
-                        appendBounded(session.rawRespBuf, respBytes)
-                    }
-                    if (session.rawPacketId == 0L) {
-                        insertNow = true
-                        session.rawPacketId = -1L
-                    }
-                    snapshotReqHex = HexUtils.bytesToHex(session.rawReqBuf.toByteArray())
-                    snapshotRespHex = HexUtils.bytesToHex(session.rawRespBuf.toByteArray())
-                    totalTx = session.rawTxBytes
-                    totalRx = session.rawRxBytes
-                }
-
-                val proto = if (isHttps) "HTTPS" else "TCP"
-                val method = if (isHttps) "TLS" else "TCP"
-                val path = if (isHttps) "/Passthrough" else "/"
-                val duration = (System.currentTimeMillis() - session.startedAt).coerceAtLeast(1L)
-
-                if (insertNow) {
-                    val matched = matchTrafficRule(host, path, port, proto)
-                    recordPacket(
-                        method = method,
-                        url = "${proto.lowercase(Locale.US)}://$host$path",
-                        host = host,
-                        path = path,
-                        port = port,
-                        protocol = proto,
-                        statusCode = null,
-                        reqHeadersJson = JSONObject()
-                            .put("Host", host)
-                            .put("Dst-IP", session.serverIpStr)
-                            .put("Mode", if (isHttps) "TLS Passthrough" else "Raw TCP")
-                            .toString(),
-                        reqHex = snapshotReqHex,
-                        respHex = snapshotRespHex,
-                        durationMs = duration,
-                        bytesTx = totalTx,
-                        bytesRx = totalRx,
-                        isBlocked = false,
-                        blockReason = null,
-                        ruleId = if (matched?.action == "HIGHLIGHT") matched.id else null,
-                        onInserted = { id ->
-                            synchronized(session.rawLock) {
-                                session.rawPacketId = id
-                            }
-                        }
-                    )
-                } else {
-                    enqueueDbWrite {
-                        val pid = synchronized(session.rawLock) { session.rawPacketId }
-                        if (pid > 0L) {
-                            (application as NetTraceApp).captureRepository.updateCapturedPacketResponse(
-                                sessionId = sid,
-                                packetId = pid,
-                                statusCode = null,
-                                responseHeadersJson = JSONObject()
-                                    .put("Host", host)
-                                    .put("Dst-IP", session.serverIpStr)
-                                    .put("Mode", if (isHttps) "TLS Passthrough" else "Raw TCP")
-                                    .toString(),
-                                responseBodyHex = snapshotRespHex,
-                                totalBytesRx = totalRx,
-                                addedBytesRx = addedRx,
-                                durationMs = duration
-                            )
-                        }
-                    }
-                }
+                // Keep raw TCP & TLS passthrough forwarding completely clean without cluttering
+                // the HTTP capture list with undecodable handshake/stream noise.
             }
 
             override fun onBytesTransferred(bytes: Int) {

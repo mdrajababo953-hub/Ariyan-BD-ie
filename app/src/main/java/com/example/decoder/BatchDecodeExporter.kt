@@ -42,7 +42,8 @@ object BatchDecodeExporter {
                 val isHttpProto = pkt.protocol.equals("HTTP", true) || pkt.protocol.equals("HTTPS", true)
                 val isRawTls = pkt.method.equals("TLS", true) || pkt.method.equals("TLS_PIN", true)
                 val looksRawTlsHex = pkt.requestBodyHex.startsWith("1603") || pkt.requestBodyHex.startsWith("1703")
-                isHttpProto && !isRawTls && !(pkt.method.equals("SYN", true) || (pkt.path == "/Passthrough" && looksRawTlsHex))
+                val decodable = PayloadAnalyzer.hasDecodablePayload(pkt.requestBodyHex, pkt.responseBodyHex)
+                isHttpProto && !isRawTls && !(pkt.method.equals("SYN", true) || (pkt.path == "/Passthrough" && looksRawTlsHex)) && decodable
             }
             FullDecodeScope.UDP_DNS -> packets.filter {
                 it.protocol.equals("UDP", true) || it.protocol.equals("DNS", true)

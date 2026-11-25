@@ -34,6 +34,7 @@ data class TargetAppSelection(
 
 data class AppSettings(
     val targetApp: TargetAppSelection = TargetAppSelection(),
+    val vpnFullPacketMode: Boolean = true,
     val activeSessionId: Long = 0L,
     val darkTheme: Boolean = true,
     val autoDecodeOnOpen: Boolean = true,
@@ -50,6 +51,7 @@ class UserPreferencesRepository(private val context: Context) {
         val TARGET_PACKAGE = stringPreferencesKey("target_package")
         val TARGET_APP_NAME = stringPreferencesKey("target_app_name")
         val TARGET_UID = stringPreferencesKey("target_uid")
+        val VPN_FULL_PACKET_MODE = booleanPreferencesKey("vpn_full_packet_mode")
         val ACTIVE_SESSION_ID = longPreferencesKey("active_session_id")
         val DARK_THEME = booleanPreferencesKey("dark_theme")
         val AUTO_DECODE = booleanPreferencesKey("auto_decode")
@@ -68,6 +70,7 @@ class UserPreferencesRepository(private val context: Context) {
                 appName = prefs[Keys.TARGET_APP_NAME].orEmpty(),
                 uid = prefs[Keys.TARGET_UID]?.toIntOrNull() ?: -1
             ),
+            vpnFullPacketMode = prefs[Keys.VPN_FULL_PACKET_MODE] ?: true,
             activeSessionId = prefs[Keys.ACTIVE_SESSION_ID] ?: 0L,
             darkTheme = prefs[Keys.DARK_THEME] ?: true,
             autoDecodeOnOpen = prefs[Keys.AUTO_DECODE] ?: true,
@@ -87,6 +90,12 @@ class UserPreferencesRepository(private val context: Context) {
             prefs[Keys.TARGET_PACKAGE] = packageName
             prefs[Keys.TARGET_APP_NAME] = appName
             prefs[Keys.TARGET_UID] = uid.toString()
+        }
+    }
+
+    suspend fun setVpnFullPacketMode(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.VPN_FULL_PACKET_MODE] = enabled
         }
     }
 

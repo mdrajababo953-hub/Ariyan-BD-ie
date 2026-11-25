@@ -139,7 +139,7 @@ fun FullDecodeDialog(
 
                     else -> {
                         Text(
-                            text = "Select which protocol folder to batch decode. All source links, headers, request hex, and response hex will be saved into one JSON file inside Documents/Aryan.",
+                            text = "Select which protocol scope to batch decode. Only decodable payloads are exported — each entry lists the API URL followed by clean decoded Request and Response JSON (no raw hex) inside Documents/Aryan.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

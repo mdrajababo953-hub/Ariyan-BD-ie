@@ -176,18 +176,18 @@ object ProtobufWireDecoder {
         var idx = 0
 
         while (idx < bytes.size) {
-            val tagRes = readVarint(bytes, idx) ?: return null
+            val tagRes = readVarint(bytes, idx, maxBytes = 5) ?: return null
             val tag = tagRes.first
             idx = tagRes.second
             if (tag <= 0L) return null
 
             val fieldNumber = (tag ushr 3).toInt()
             val wireType = (tag and 0x07).toInt()
-            if (fieldNumber <= 0 || fieldNumber > 536_870_911) return null
+            if (fieldNumber <= 0 || fieldNumber > 100_000) return null
 
             when (wireType) {
                 0 -> { // Varint
-                    val valRes = readVarint(bytes, idx) ?: return null
+                    val valRes = readVarint(bytes, idx, maxBytes = 10) ?: return null
                     val raw = valRes.first
                     idx = valRes.second
                     val zigZag = (raw ushr 1) xor -(raw and 1L)
@@ -231,7 +231,7 @@ object ProtobufWireDecoder {
                     )
                 }
                 2 -> { // Length-delimited
-                    val lenRes = readVarint(bytes, idx) ?: return null
+                    val lenRes = readVarint(bytes, idx, maxBytes = 5) ?: return null
                     val lenLong = lenRes.first
                     idx = lenRes.second
                     if (lenLong < 0 || lenLong > (bytes.size - idx)) return null
@@ -253,12 +253,14 @@ object ProtobufWireDecoder {
                         )
                     } else {
                         val printableText = tryDecodeUtf8Text(slice)
-                        val nested = if (printableText == null || slice.size >= 4) {
+                        val pureAscii = isPurePrintableAscii(slice)
+                        val nested = if (!pureAscii && (printableText == null || slice.size >= 4)) {
                             decode(slice, depth + 1)
-                        } else null
+                        } else {
+                            null
+                        }
 
-                        // Prefer text if clearly printable ASCII/UTF-8 and not nested with >1 valid fields
-                        if (printableText != null && (nested == null || isMostlyAsciiText(slice))) {
+                        if (printableText != null && (pureAscii || nested == null)) {
                             nodes.add(
                                 ProtobufFieldNode(
                                     fieldNumber = fieldNumber,
@@ -325,6 +327,10 @@ object ProtobufWireDecoder {
         }
 
         if (nodes.isEmpty()) return null
+        if (depth == 0 && nodes.all { it.wireTypeName.startsWith("BYTES") }) {
+            // Avoid false-positive Protobuf hits on random/encrypted binary blobs split by stray tags
+            return null
+        }
         val jsonObj = nodesToJsonObject(nodes)
         val fieldsDict = ProtobufFieldsFormatter.formatFieldsDict(nodes)
         return ProtobufDecodeResult(
@@ -339,7 +345,7 @@ object ProtobufWireDecoder {
         val grouped = nodes.groupBy { it.fieldNumber }
         val obj = JSONObject()
         for ((fieldNum, items) in grouped) {
-            val key = "field_$fieldNum"
+            val key = fieldNum.toString()
             if (items.size == 1) {
                 obj.put(key, items.first().jsonValue)
             } else {
@@ -351,14 +357,16 @@ object ProtobufWireDecoder {
         return obj
     }
 
-    private fun readVarint(bytes: ByteArray, start: Int): Pair<Long, Int>? {
+    private fun readVarint(bytes: ByteArray, start: Int, maxBytes: Int = 10): Pair<Long, Int>? {
         var result = 0L
         var shift = 0
         var i = start
-        while (i < bytes.size && shift <= 63) {
+        var count = 0
+        while (i < bytes.size && shift <= 63 && count < maxBytes) {
             val b = bytes[i].toInt() and 0xFF
             result = result or ((b.toLong() and 0x7FL) shl shift)
             i++
+            count++
             if ((b and 0x80) == 0) {
                 return result to i
             }
@@ -381,13 +389,12 @@ object ProtobufWireDecoder {
         return if (valid) str else null
     }
 
-    private fun isMostlyAsciiText(slice: ByteArray): Boolean {
+    private fun isPurePrintableAscii(slice: ByteArray): Boolean {
         if (slice.isEmpty()) return false
-        val asciiPrintable = slice.count { b ->
+        return slice.all { b ->
             val v = b.toInt() and 0xFF
             v in 32..126 || v == 10 || v == 13 || v == 9
         }
-        return asciiPrintable == slice.size && slice.any { (it.toInt() and 0xFF) in 65..122 }
     }
 }
 
@@ -677,10 +684,11 @@ object PacketJsonSerializer {
         return result
     }
 
-    fun buildPayloadJsonObject(hex: String): JSONObject {
+    fun decodePayloadValue(hex: String): Any {
         val cleanHex = HexUtils.sanitizeHex(hex)
+        if (cleanHex.length < 2) return JSONObject.NULL
         val analysis = PayloadAnalyzer.analyze(cleanHex)
-        val decodedValue: Any = when {
+        return when {
             analysis.protobuf != null -> JSONObject(analysis.protobuf.jsonFormatted)
             analysis.formattedJson != null -> {
                 runCatching {
@@ -688,19 +696,33 @@ object PacketJsonSerializer {
                     if (trimmed.startsWith("[")) JSONArray(trimmed) else JSONObject(trimmed)
                 }.getOrElse { analysis.formattedJson }
             }
-            analysis.utf8Text != null -> analysis.utf8Text
+            analysis.classification == PayloadClassification.TEXT && analysis.utf8Text != null -> analysis.utf8Text
             else -> JSONObject.NULL
         }
-        return JSONObject().apply {
-            put("hex", cleanHex)
-            put("decoded", decodedValue)
+    }
+
+    fun decodePayloadFormattedText(hex: String): String? {
+        val cleanHex = HexUtils.sanitizeHex(hex)
+        if (cleanHex.length < 2) return null
+        val analysis = PayloadAnalyzer.analyze(cleanHex)
+        return when {
+            analysis.protobuf != null -> analysis.protobuf.jsonFormatted
+            analysis.formattedJson != null -> analysis.formattedJson
+            analysis.classification == PayloadClassification.TEXT && analysis.utf8Text != null -> analysis.utf8Text
+            else -> null
         }
     }
 
     fun packetToJsonObject(packet: CapturedPacketEntity): JSONObject {
+        val apiEndpoint = if (packet.method.isNotBlank() && packet.url.isNotBlank()) {
+            "${packet.method} ${packet.url}"
+        } else {
+            packet.url.ifBlank { "${packet.method} ${packet.host}${packet.path}".trim() }
+        }
         return JSONObject().apply {
-            put("request", buildPayloadJsonObject(packet.requestBodyHex))
-            put("response", buildPayloadJsonObject(packet.responseBodyHex))
+            put("api", apiEndpoint)
+            put("request", decodePayloadValue(packet.requestBodyHex))
+            put("response", decodePayloadValue(packet.responseBodyHex))
         }
     }
 

@@ -162,7 +162,7 @@ class PacketDecodersTest {
     }
 
     @Test
-    fun `batch decode exporter filters protocols and builds combined aryan json`() = kotlinx.coroutines.test.runTest {
+    fun `batch decode exporter filters protocols and builds combined aryan json without hex`() = kotlinx.coroutines.test.runTest {
         val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
         val httpsPkt = com.example.data.db.CapturedPacketEntity(
             id = 1,
@@ -195,15 +195,27 @@ class PacketDecodersTest {
             requestBodyHex = "08f4f3c8cf3d",
             responseBodyHex = ""
         )
-        val tlsHandshakePkt = httpsPkt.copy(
+        val tcpProtoPkt = httpsPkt.copy(
             id = 3,
+            method = "TCP",
+            url = "tcp://10.0.0.5:9000",
+            host = "10.0.0.5",
+            path = ":9000",
+            port = 9000,
+            protocol = "TCP",
+            requestBodyHex = "0801",
+            responseBodyHex = ""
+        )
+        val tlsHandshakePkt = httpsPkt.copy(
+            id = 4,
             method = "TLS",
-            url = "https://clientbp.ggpolarbear.com/Passthrough",
-            path = "/Passthrough",
+            url = "https://clientbp.ggpolarbear.com:443",
+            path = ":443",
+            protocol = "TCP",
             requestBodyHex = "160303007a02000076",
             responseBodyHex = ""
         )
-        val all = listOf(httpsPkt, udpPkt, tlsHandshakePkt)
+        val all = listOf(httpsPkt, udpPkt, tcpProtoPkt, tlsHandshakePkt)
 
         assertEquals(1, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.HTTP_HTTPS).size)
         assertEquals(1, com.example.decoder.BatchDecodeExporter.filterPacketsByScope(all, com.example.decoder.FullDecodeScope.UDP_DNS).size)
@@ -225,20 +237,19 @@ class PacketDecodersTest {
         val arr = org.json.JSONArray(res.jsonContent)
         assertEquals(1, arr.length())
         val item = arr.getJSONObject(0)
-        assertEquals(setOf("request", "response"), item.keys().asSequence().toSet())
-        val reqObj = item.getJSONObject("request")
+        assertEquals(listOf("api", "request", "response"), item.keys().asSequence().toList())
+        assertEquals("POST https://clientbp.ggpolarbear.com/GetLikedRecord", item.getString("api"))
+        assertTrue(item.isNull("request"))
         val respObj = item.getJSONObject("response")
-        assertEquals(setOf("hex", "decoded"), reqObj.keys().asSequence().toSet())
-        assertEquals(setOf("hex", "decoded"), respObj.keys().asSequence().toSet())
-        assertEquals("1a725b2c56ec52ba7d09623454c0a003", reqObj.getString("hex"))
-        assertEquals("0a00", respObj.getString("hex"))
+        assertTrue(respObj.has("1"))
+        assertTrue(!res.jsonContent.contains("\"hex\""))
         assertTrue(!res.jsonContent.contains("0000  "))
         assertTrue(!res.jsonContent.contains("sourceLink"))
         assertTrue(!res.jsonContent.contains("requestHeaders"))
     }
 
     @Test
-    fun `formatHexDump and packetToFormattedJson emit clean hex and strictly request response json`() {
+    fun `formatHexDump and packetToFormattedJson emit clean hex and api request response without hex`() {
         val hexDump = HexUtils.formatHexDump(HexUtils.hexToBytes("160303007a"))
         assertEquals("160303007a", hexDump)
         assertTrue(!hexDump.contains("|"))
@@ -266,16 +277,33 @@ class PacketDecodersTest {
             blockReason = null
         )
         val obj = org.json.JSONObject(com.example.decoder.PacketJsonSerializer.packetToFormattedJson(pkt))
-        assertEquals(setOf("request", "response"), obj.keys().asSequence().toSet())
-        assertEquals("1a725b2c56ec52ba7d09623454c0a003", obj.getJSONObject("request").getString("hex"))
-        assertTrue(obj.getJSONObject("request").isNull("decoded"))
-        assertEquals("0a00", obj.getJSONObject("response").getString("hex"))
-        assertTrue(obj.getJSONObject("response").getJSONObject("decoded").has("field_1"))
+        assertEquals(listOf("api", "request", "response"), obj.keys().asSequence().toList())
+        assertEquals("POST https://clientbp.ggpolarbear.com/GetLikedRecord", obj.getString("api"))
+        assertTrue(obj.isNull("request"))
+        assertTrue(obj.getJSONObject("response").has("1"))
 
         val protoReqPkt = pkt.copy(requestBodyHex = "08f4f3c8cf3d1026")
         val protoObj = org.json.JSONObject(com.example.decoder.PacketJsonSerializer.packetToFormattedJson(protoReqPkt))
-        assertEquals(16541432308L, protoObj.getJSONObject("request").getJSONObject("decoded").getLong("field_1"))
-        assertEquals(38L, protoObj.getJSONObject("request").getJSONObject("decoded").getLong("field_2"))
+        assertEquals(16541432308L, protoObj.getJSONObject("request").getLong("1"))
+        assertEquals(38L, protoObj.getJSONObject("request").getLong("2"))
+    }
+
+    @Test
+    fun `protobuf decoder preserves ascii dates and versions as strings and rejects pure bytes noise`() {
+        // Field 1 (varint 1) + Field 2 (length-delimited ASCII date "2026-11-25 00:01:39") + Field 3 ("1.134.21")
+        val ts = "2026-11-25 00:01:39".toByteArray(Charsets.UTF_8)
+        val ver = "1.134.21".toByteArray(Charsets.UTF_8)
+        val protoPayload = byteArrayOf(0x08, 0x01, 0x12, ts.size.toByte()) + ts + byteArrayOf(0x1A, ver.size.toByte()) + ver
+        val analysis = PayloadAnalyzer.analyze(HexUtils.bytesToHex(protoPayload))
+        assertEquals(PayloadClassification.PROTOBUF, analysis.classification)
+        val jsonObj = org.json.JSONObject(analysis.protobuf!!.jsonFormatted)
+        assertEquals("2026-11-25 00:01:39", jsonObj.getString("2"))
+        assertEquals("1.134.21", jsonObj.getString("3"))
+
+        // Opaque non-ASCII length-delimited blob (all fields BYTES) should not falsely classify as PROTOBUF
+        val noiseBytes = byteArrayOf(0x1A, 0x06, 0xFE.toByte(), 0x80.toByte(), 0xFF.toByte(), 0xAA.toByte(), 0x99.toByte(), 0xBB.toByte())
+        assertEquals(null, ProtobufWireDecoder.decode(noiseBytes))
+        assertEquals(PayloadClassification.RAW_BINARY, PayloadAnalyzer.quickClassify(HexUtils.bytesToHex(noiseBytes)))
     }
 
     @Test

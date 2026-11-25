@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.security.KeyChain
 import android.util.Base64
 import java.io.ByteArrayInputStream
@@ -182,18 +183,48 @@ class MitmCertificateManager(private val context: Context) {
         }
     }
 
+    fun createSecuritySettingsIntent(): Intent {
+        return Intent(Settings.ACTION_SECURITY_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }
+
+    fun prepareDirectCaInstallIntents(): List<Intent> {
+        val securitySettings = createSecuritySettingsIntent()
+        val keyChainInstall = createInstallCaIntent()
+        val systemSettings = Intent(Settings.ACTION_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11+ (incl. Android 15 / Honor MagicOS) requires CA certs to be installed
+            // directly from Settings -> Security -> Encryption & credentials -> Install CA certificate.
+            listOf(securitySettings, keyChainInstall, systemSettings)
+        } else {
+            listOf(keyChainInstall, securitySettings, systemSettings)
+        }
+    }
+
     fun saveCaCertToAryanFolder(): String {
         val pemBytes = getCaPemString().toByteArray(Charsets.UTF_8)
         val fileName = "NetTrace_Proxy_CA.crt"
+        val relPath = "${Environment.DIRECTORY_DOCUMENTS}/Aryan"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
+            val filesUri = MediaStore.Files.getContentUri("external")
+            runCatching {
+                resolver.delete(
+                    filesUri,
+                    "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
+                    arrayOf(fileName, "%Aryan%")
+                )
+            }
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, "application/x-x509-ca-cert")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOCUMENTS}/Aryan")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
             }
-            val uri = resolver.insert(MediaStore.Files.getContentUri("external"), values)
+            val uri = resolver.insert(filesUri, values)
             if (uri != null) {
                 resolver.openOutputStream(uri)?.use { out ->
                     out.write(pemBytes)

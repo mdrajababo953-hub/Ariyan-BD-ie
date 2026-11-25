@@ -86,14 +86,41 @@ class NetTraceVpnService : VpnService() {
         private const val MAX_OOO_SEGMENTS = 24
         private const val UDP_IDLE_TIMEOUT_MS = 45_000L
         private const val TCP_IDLE_TIMEOUT_MS = 120_000L
+        private const val MAX_RAW_FLOW_CAPTURE_BYTES = 32_768
+        private const val FLOW_DB_FLUSH_INTERVAL_MS = 700L
+        private const val MAX_TURNS_PER_FLOW = 80
+        private const val RAW_TURN_REQ_AFTER_RESP_GAP_MS = 100L
+        private const val RAW_TURN_REQ_IDLE_GAP_MS = 180L
+        private const val UDP_TURN_REQ_AFTER_RESP_GAP_MS = 120L
+        private const val UDP_TURN_REQ_IDLE_GAP_MS = 200L
+        private const val SERVER_PUSH_ROTATE_GAP_MS = 450L
 
         private val _runtimeState = MutableStateFlow(VpnRuntimeState())
         val runtimeState: StateFlow<VpnRuntimeState> = _runtimeState.asStateFlow()
 
         private val pinningBypassedHosts = ConcurrentHashMap.newKeySet<String>()
 
+        @Volatile
+        private var liveOnlyDecodableHttp: Boolean = true
+
+        @Volatile
+        private var liveCaTrustedOverride: Boolean? = null
+
         fun clearPinningBypassCache() {
             pinningBypassedHosts.clear()
+        }
+
+        fun updateFilter(onlyDecodable: Boolean) {
+            liveOnlyDecodableHttp = onlyDecodable
+        }
+
+        fun updateCaTrusted(trusted: Boolean) {
+            liveCaTrustedOverride = trusted
+            _runtimeState.update { state ->
+                if (state.isRunning) {
+                    state.copy(caTrusted = trusted, mitmActive = state.mitmActive || trusted)
+                } else state
+            }
         }
 
         fun startCapture(
@@ -103,6 +130,7 @@ class NetTraceVpnService : VpnService() {
             mitmEnabled: Boolean = true,
             onlyDecodableHttp: Boolean = true
         ) {
+            liveOnlyDecodableHttp = onlyDecodableHttp
             val intent = Intent(context, NetTraceVpnService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_PACKAGE, packageName)
@@ -204,6 +232,22 @@ class NetTraceVpnService : VpnService() {
         @Volatile var txWriterJob: Job? = null
         val txChannel = Channel<ByteArray>(capacity = 2048)
         val oooBuffer = TreeMap<Long, ByteArray>()
+
+        // Aggregated raw TCP / TLS / WebSocket turn-based capture state
+        val rawLock = Any()
+        @Volatile var rawPacketIdHolder = PacketIdHolder()
+        val rawReqCollector = ByteArrayOutputStream()
+        val rawRespCollector = ByteArrayOutputStream()
+        val rawTxBytes = AtomicInteger(0)
+        val rawRxBytes = AtomicInteger(0)
+        val rawPersistedBytes = AtomicInteger(0)
+        val rawLastFlushAt = AtomicLong(0L)
+        val rawInserted = AtomicBoolean(false)
+        val rawTurnIndex = AtomicInteger(1)
+        @Volatile var rawTurnStartedAt: Long = startedAt
+        @Volatile var rawLastTxAt: Long = 0L
+        @Volatile var rawLastRxAt: Long = 0L
+        @Volatile var rawIsHttps: Boolean = false
     }
 
     private data class UdpFlowSocket(
@@ -215,11 +259,29 @@ class NetTraceVpnService : VpnService() {
         val clientPort: Int,
         val serverPort: Int,
         val isDns: Boolean,
+        val protoLabel: String,
+        val dnsQuery: String?,
         val txChannel: Channel<Pair<ByteArray, InetAddress>>,
         val writerJob: Job,
         val readerJob: Job,
-        @Volatile var lastActivityAt: Long = System.currentTimeMillis()
-    )
+        @Volatile var hostName: String,
+        val startedAt: Long = System.currentTimeMillis(),
+        @Volatile var lastActivityAt: Long = startedAt
+    ) {
+        val flowLock = Any()
+        @Volatile var packetIdHolder = PacketIdHolder()
+        val reqCollector = ByteArrayOutputStream()
+        val respCollector = ByteArrayOutputStream()
+        val txBytes = AtomicInteger(0)
+        val rxBytes = AtomicInteger(0)
+        val persistedBytes = AtomicInteger(0)
+        val lastFlushAt = AtomicLong(0L)
+        val inserted = AtomicBoolean(false)
+        val turnIndex = AtomicInteger(1)
+        @Volatile var turnStartedAt: Long = startedAt
+        @Volatile var lastTxAt: Long = 0L
+        @Volatile var lastRxAt: Long = 0L
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -230,17 +292,19 @@ class NetTraceVpnService : VpnService() {
             }
             ACTION_START -> {
                 val pkg = intent.getStringExtra(EXTRA_PACKAGE).orEmpty()
-                val label = intent.getStringExtra(EXTRA_APP_NAME).orEmpty().ifBlank { pkg }
-                val enableMitm = intent.getBooleanExtra(EXTRA_MITM_ENABLED, true)
-                val onlyDecodable = intent.getBooleanExtra(EXTRA_ONLY_DECODABLE, true)
-                startForegroundWithNotification(label.ifBlank { "Target App" }, 0)
                 if (pkg.isBlank()) {
-                    _runtimeState.value = VpnRuntimeState(errorMessage = "No target app selected.")
-                    stopVpnEngine()
+                    _runtimeState.update {
+                        it.copy(isRunning = false, errorMessage = "Select a Target App before starting VPN capture.")
+                    }
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                val label = intent.getStringExtra(EXTRA_APP_NAME).orEmpty().ifBlank { pkg }
+                val enableMitm = intent.getBooleanExtra(EXTRA_MITM_ENABLED, true)
+                val onlyDecodable = intent.getBooleanExtra(EXTRA_ONLY_DECODABLE, false)
+                startForegroundWithNotification(label, 0)
                 onlyDecodableHttp = onlyDecodable
+                liveOnlyDecodableHttp = onlyDecodable
                 startVpnEngine(pkg, label, enableMitm)
             }
         }
@@ -254,6 +318,7 @@ class NetTraceVpnService : VpnService() {
         mitmEnabled = enableMitm
         caTrustedByDevice = false
         caTrustChecked = false
+        liveCaTrustedOverride = null
         pinningBypassedHosts.clear()
         packetCounter.set(0)
         skippedCounter.set(0)
@@ -277,6 +342,7 @@ class NetTraceVpnService : VpnService() {
         }
 
         try {
+            // Strict Per-App VPN Isolation: route only the selected game/app through TUN
             builder.addAllowedApplication(targetPkg)
         } catch (_: PackageManager.NameNotFoundException) {
             _runtimeState.value = VpnRuntimeState(
@@ -379,6 +445,7 @@ class NetTraceVpnService : VpnService() {
                 udpSockets.entries.removeIf { (_, flow) ->
                     val expired = (now - flow.lastActivityAt) > UDP_IDLE_TIMEOUT_MS
                     if (expired) {
+                        flushUdpFlowToDb(flow, force = true)
                         flow.txChannel.close()
                         flow.writerJob.cancel()
                         flow.readerJob.cancel()
@@ -488,7 +555,8 @@ class NetTraceVpnService : VpnService() {
         }
 
         // Force QUIC/HTTP3 (UDP 443) to fall back to TCP 443 HTTPS when MITM decryption is active
-        if (udp.dstPort == 443 && mitmEnabled && caTrustedByDevice &&
+        val effectiveCaTrusted = liveCaTrustedOverride ?: caTrustedByDevice
+        if (udp.dstPort == 443 && mitmEnabled && effectiveCaTrusted &&
             !pinningBypassedHosts.contains(displayHost.lowercase(Locale.US))
         ) {
             if (!ip.isIpv6) {
@@ -533,10 +601,12 @@ class NetTraceVpnService : VpnService() {
                     try {
                         sock.receive(recvPkt)
                         val data = recvBuf.copyOfRange(0, recvPkt.length)
-                        flowHolder.lastActivityAt = System.currentTimeMillis()
+                        val now = System.currentTimeMillis()
+                        flowHolder.lastActivityAt = now
                         if (isDns) {
                             PacketDissector.extractDnsAnswers(data)?.let { (qName, ips) ->
                                 ips.forEach { resolvedIp -> dnsHostMap[resolvedIp] = qName }
+                                if (qName.isNotBlank()) flowHolder.hostName = qName
                             }
                         }
                         val replyIp = PacketBuilder.buildUdpPacket(
@@ -549,10 +619,75 @@ class NetTraceVpnService : VpnService() {
                         )
                         tunWriteChannel.send(replyIp)
                         recordBytesTransferred(data.size)
+
+                        var isFirstRx = false
+                        val turnReqHex: String
+                        val turnRespHex: String
+                        val turnTx: Int
+                        val turnRx: Int
+                        val turnNum: Int
+                        val turnHolder: PacketIdHolder
+                        synchronized(flowHolder.flowLock) {
+                            val shouldRotate = flowHolder.inserted.get() &&
+                                flowHolder.rxBytes.get() > 0 &&
+                                flowHolder.turnIndex.get() < MAX_TURNS_PER_FLOW &&
+                                (now - flowHolder.lastRxAt) >= SERVER_PUSH_ROTATE_GAP_MS &&
+                                (now - flowHolder.lastTxAt) >= SERVER_PUSH_ROTATE_GAP_MS
+                            if (shouldRotate) {
+                                rotateUdpFlowTurnLocked(flowHolder, now)
+                            }
+                            if (flowHolder.rxBytes.get() == 0) isFirstRx = true
+                            appendFlowBytes(flowHolder.respCollector, data)
+                            flowHolder.rxBytes.addAndGet(data.size)
+                            flowHolder.lastRxAt = now
+                            turnReqHex = cappedHex(flowHolder.reqCollector.toByteArray())
+                            turnRespHex = cappedHex(flowHolder.respCollector.toByteArray())
+                            turnTx = flowHolder.txBytes.get()
+                            turnRx = flowHolder.rxBytes.get()
+                            turnNum = flowHolder.turnIndex.get()
+                            turnHolder = flowHolder.packetIdHolder
+                        }
+                        val shouldRecord = !liveOnlyDecodableHttp ||
+                            com.example.decoder.PayloadAnalyzer.hasDecodablePayload(turnReqHex, turnRespHex)
+                        if (shouldRecord && !flowHolder.inserted.get() && flowHolder.inserted.compareAndSet(false, true)) {
+                            val flowPath = buildUdpPath(flowHolder, turnNum)
+                            val flowUrl = buildUdpUrl(flowHolder, turnNum)
+                            flowHolder.persistedBytes.set(turnTx + turnRx)
+                            flowHolder.lastFlushAt.set(now)
+                            recordPacket(
+                                method = protoLabel,
+                                url = flowUrl,
+                                host = flowHolder.hostName,
+                                path = flowPath,
+                                port = udp.dstPort,
+                                protocol = protoLabel,
+                                statusCode = null,
+                                reqHeadersJson = JSONObject()
+                                    .put("Flow", "${ip.srcIpStr}:${udp.srcPort} -> ${ip.dstIpStr}:${udp.dstPort}")
+                                    .put("Turn", turnNum)
+                                    .apply { if (dnsQuery != null) put("DNS-Query", dnsQuery) }
+                                    .toString(),
+                                reqHex = turnReqHex,
+                                respHex = turnRespHex,
+                                durationMs = (now - flowHolder.turnStartedAt).coerceAtLeast(0L),
+                                bytesTx = turnTx,
+                                bytesRx = turnRx,
+                                isBlocked = false,
+                                blockReason = null,
+                                ruleId = null,
+                                onInserted = { id ->
+                                    turnHolder.packetId = id
+                                    flushUdpFlowToDb(flowHolder, force = false)
+                                }
+                            )
+                        } else if (flowHolder.inserted.get()) {
+                            flushUdpFlowToDb(flowHolder, force = isFirstRx)
+                        }
                     } catch (_: Exception) {
                         break
                     }
                 }
+                flushUdpFlowToDb(flowHolder, force = true)
                 txChan.close()
                 writer.cancel()
                 runCatching { sock.close() }
@@ -567,20 +702,90 @@ class NetTraceVpnService : VpnService() {
                 clientPort = udp.srcPort,
                 serverPort = udp.dstPort,
                 isDns = isDns,
+                protoLabel = protoLabel,
+                dnsQuery = dnsQuery,
                 txChannel = txChan,
                 writerJob = writer,
-                readerJob = reader
+                readerJob = reader,
+                hostName = displayHost
             )
             udpSockets[flowKey] = flowHolder
             flowHolder
         }
 
-        udpFlow.lastActivityAt = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        udpFlow.lastActivityAt = now
+        if (dnsQuery != null) {
+            udpFlow.hostName = dnsQuery
+        }
         runCatching {
             val destAddr = InetAddress.getByAddress(ip.dstIp)
             udpFlow.txChannel.trySend(udp.payload to destAddr)
         }
         recordBytesTransferred(udp.payload.size)
+
+        if (udp.payload.isNotEmpty()) {
+            val initialReqHex: String
+            val initialRespHex: String
+            val initialTx: Int
+            val initialRx: Int
+            val turnNum: Int
+            val turnHolder: PacketIdHolder
+            synchronized(udpFlow.flowLock) {
+                val shouldRotate = udpFlow.rxBytes.get() > 0 &&
+                    udpFlow.turnIndex.get() < MAX_TURNS_PER_FLOW &&
+                    ((now - udpFlow.lastRxAt) >= UDP_TURN_REQ_AFTER_RESP_GAP_MS ||
+                        (now - udpFlow.lastTxAt) >= UDP_TURN_REQ_IDLE_GAP_MS)
+                if (shouldRotate) {
+                    rotateUdpFlowTurnLocked(udpFlow, now)
+                }
+                appendFlowBytes(udpFlow.reqCollector, udp.payload)
+                udpFlow.txBytes.addAndGet(udp.payload.size)
+                udpFlow.lastTxAt = now
+                initialReqHex = cappedHex(udpFlow.reqCollector.toByteArray())
+                initialRespHex = cappedHex(udpFlow.respCollector.toByteArray())
+                initialTx = udpFlow.txBytes.get()
+                initialRx = udpFlow.rxBytes.get()
+                turnNum = udpFlow.turnIndex.get()
+                turnHolder = udpFlow.packetIdHolder
+            }
+            val shouldRecord = !liveOnlyDecodableHttp ||
+                com.example.decoder.PayloadAnalyzer.hasDecodablePayload(initialReqHex, initialRespHex)
+            if (shouldRecord && !udpFlow.inserted.get() && udpFlow.inserted.compareAndSet(false, true)) {
+                val flowPath = buildUdpPath(udpFlow, turnNum)
+                val flowUrl = buildUdpUrl(udpFlow, turnNum)
+                udpFlow.persistedBytes.set(initialTx + initialRx)
+                udpFlow.lastFlushAt.set(now)
+                recordPacket(
+                    method = protoLabel,
+                    url = flowUrl,
+                    host = udpFlow.hostName,
+                    path = flowPath,
+                    port = udp.dstPort,
+                    protocol = protoLabel,
+                    statusCode = null,
+                    reqHeadersJson = JSONObject()
+                        .put("Flow", "${ip.srcIpStr}:${udp.srcPort} -> ${ip.dstIpStr}:${udp.dstPort}")
+                        .put("Turn", turnNum)
+                        .apply { if (dnsQuery != null) put("DNS-Query", dnsQuery) }
+                        .toString(),
+                    reqHex = initialReqHex,
+                    respHex = initialRespHex,
+                    durationMs = 0L,
+                    bytesTx = initialTx,
+                    bytesRx = initialRx,
+                    isBlocked = false,
+                    blockReason = null,
+                    ruleId = if (matchedRule?.action == "HIGHLIGHT") matchedRule.id else null,
+                    onInserted = { id ->
+                        turnHolder.packetId = id
+                        flushUdpFlowToDb(udpFlow, force = false)
+                    }
+                )
+            } else if (udpFlow.inserted.get()) {
+                flushUdpFlowToDb(udpFlow, force = false)
+            }
+        }
     }
 
     private fun handleTcpPacket(raw: ByteArray, ip: IpPacketHeader) {
@@ -1000,7 +1205,8 @@ class NetTraceVpnService : VpnService() {
             }
 
             val hostKey = session.hostName.lowercase(Locale.US)
-            val attemptMitm = mitmEnabled && caTrustedByDevice && isTlsClientHello && !pinningBypassedHosts.contains(hostKey)
+            val effectiveCaTrusted = liveCaTrustedOverride ?: caTrustedByDevice
+            val attemptMitm = mitmEnabled && effectiveCaTrusted && isTlsClientHello && !pinningBypassedHosts.contains(hostKey)
 
             if (attemptMitm) {
                 var plainUpstream: Socket? = null
@@ -1132,7 +1338,7 @@ class NetTraceVpnService : VpnService() {
     private fun createCallbacks(session: TcpFlowSession): HttpCaptureCallbacks {
         return object : HttpCaptureCallbacks {
             override fun onHttpRequest(meta: CapturedHttpRequestMeta) {
-                if (onlyDecodableHttp) {
+                if (liveOnlyDecodableHttp) {
                     // Defer saving until response arrives so only decodable HTTP pairs are recorded
                     return
                 }
@@ -1169,7 +1375,7 @@ class NetTraceVpnService : VpnService() {
                 val sid = activeSessionId
                 if (sid == 0L) return
 
-                if (onlyDecodableHttp &&
+                if (liveOnlyDecodableHttp &&
                     !com.example.decoder.PayloadAnalyzer.hasDecodablePayload(meta.requestBodyHex, responseBodyHex)
                 ) {
                     val skipped = skippedCounter.incrementAndGet()
@@ -1240,10 +1446,339 @@ class NetTraceVpnService : VpnService() {
                 port: Int,
                 reqBytes: ByteArray?,
                 respBytes: ByteArray?
-            ) = Unit
+            ) {
+                session.rawIsHttps = isHttps
+                val now = System.currentTimeMillis()
+                var firstResp = false
+                val initReqHex: String
+                val initRespHex: String
+                val txNow: Int
+                val rxNow: Int
+                val turnNum: Int
+                val turnHolder: PacketIdHolder
+                val turnStarted: Long
+                synchronized(session.rawLock) {
+                    if (reqBytes != null && reqBytes.isNotEmpty()) {
+                        val shouldRotateForReq = session.rawRxBytes.get() > 0 &&
+                            session.rawTurnIndex.get() < MAX_TURNS_PER_FLOW &&
+                            ((now - session.rawLastRxAt) >= RAW_TURN_REQ_AFTER_RESP_GAP_MS ||
+                                (now - session.rawLastTxAt) >= RAW_TURN_REQ_IDLE_GAP_MS)
+                        if (shouldRotateForReq) {
+                            rotateTcpRawTurnLocked(session, host, now)
+                        }
+                        appendFlowBytes(session.rawReqCollector, reqBytes)
+                        session.rawTxBytes.addAndGet(reqBytes.size)
+                        session.rawLastTxAt = now
+                    }
+                    if (respBytes != null && respBytes.isNotEmpty()) {
+                        val shouldRotateForPush = session.rawRxBytes.get() > 0 &&
+                            session.rawTurnIndex.get() < MAX_TURNS_PER_FLOW &&
+                            (now - session.rawLastRxAt) >= SERVER_PUSH_ROTATE_GAP_MS &&
+                            (now - session.rawLastTxAt) >= SERVER_PUSH_ROTATE_GAP_MS
+                        if (shouldRotateForPush) {
+                            rotateTcpRawTurnLocked(session, host, now)
+                        }
+                        if (session.rawRxBytes.get() == 0) firstResp = true
+                        appendFlowBytes(session.rawRespCollector, respBytes)
+                        session.rawRxBytes.addAndGet(respBytes.size)
+                        session.rawLastRxAt = now
+                    }
+                    initReqHex = cappedHex(session.rawReqCollector.toByteArray())
+                    initRespHex = cappedHex(session.rawRespCollector.toByteArray())
+                    txNow = session.rawTxBytes.get()
+                    rxNow = session.rawRxBytes.get()
+                    turnNum = session.rawTurnIndex.get()
+                    turnHolder = session.rawPacketIdHolder
+                    turnStarted = session.rawTurnStartedAt
+                }
+
+                val shouldRecord = !liveOnlyDecodableHttp ||
+                    com.example.decoder.PayloadAnalyzer.hasDecodablePayload(initReqHex, initRespHex)
+                if (shouldRecord && !session.rawInserted.get() && session.rawInserted.compareAndSet(false, true)) {
+                    val effectiveHost = host.ifBlank { session.hostName }
+                    val methodLabel = if (isHttps) "TLS" else "TCP"
+                    val pathLabel = buildTcpRawPath(methodLabel, port, turnNum)
+                    val urlLabel = buildTcpRawUrl(isHttps, effectiveHost, port, turnNum)
+                    session.rawPersistedBytes.set(txNow + rxNow)
+                    session.rawLastFlushAt.set(now)
+
+                    val matched = matchTrafficRule(effectiveHost, pathLabel, port, "TCP")
+                    recordPacket(
+                        method = methodLabel,
+                        url = urlLabel,
+                        host = effectiveHost,
+                        path = pathLabel,
+                        port = port,
+                        protocol = "TCP",
+                        statusCode = null,
+                        reqHeadersJson = JSONObject()
+                            .put("Flow", "${session.clientIpStr}:${session.clientPort} -> ${session.serverIpStr}:$port")
+                            .put("Transport", if (isHttps) "TLS / WSS Stream" else "TCP / WS Stream")
+                            .put("Turn", turnNum)
+                            .toString(),
+                        reqHex = initReqHex,
+                        respHex = initRespHex,
+                        durationMs = (now - turnStarted).coerceAtLeast(0L),
+                        bytesTx = txNow,
+                        bytesRx = rxNow,
+                        isBlocked = false,
+                        blockReason = null,
+                        ruleId = if (matched?.action == "HIGHLIGHT") matched.id else null,
+                        onInserted = { id ->
+                            turnHolder.packetId = id
+                            flushTcpRawFlowToDb(session, force = false)
+                        }
+                    )
+                } else if (session.rawInserted.get()) {
+                    flushTcpRawFlowToDb(session, force = firstResp)
+                }
+            }
 
             override fun onBytesTransferred(bytes: Int) {
                 recordBytesTransferred(bytes)
+            }
+        }
+    }
+
+    private fun buildUdpPath(flow: UdpFlowSocket, turnNum: Int): String {
+        val base = if (flow.dnsQuery != null) "/${flow.dnsQuery}" else "/UDP:${flow.serverPort}"
+        return if (turnNum > 1) "$base #$turnNum" else base
+    }
+
+    private fun buildUdpUrl(flow: UdpFlowSocket, turnNum: Int): String {
+        val base = "${flow.protoLabel.lowercase(Locale.US)}://${flow.hostName}:${flow.serverPort}"
+        return if (turnNum > 1) "$base#$turnNum" else base
+    }
+
+    private fun buildTcpRawPath(methodLabel: String, port: Int, turnNum: Int): String {
+        return if (turnNum > 1) "/$methodLabel #$turnNum (:$port)" else "/$methodLabel (:$port)"
+    }
+
+    private fun buildTcpRawUrl(isHttps: Boolean, host: String, port: Int, turnNum: Int): String {
+        val scheme = if (isHttps) "tls" else "tcp"
+        val base = "$scheme://$host:$port"
+        return if (turnNum > 1) "$base#$turnNum" else base
+    }
+
+    private fun rotateUdpFlowTurnLocked(flow: UdpFlowSocket, now: Long) {
+        val sid = activeSessionId
+        val holder = flow.packetIdHolder
+        val reqHex = cappedHex(flow.reqCollector.toByteArray())
+        val respHex = cappedHex(flow.respCollector.toByteArray())
+        val txTotal = flow.txBytes.get()
+        val rxTotal = flow.rxBytes.get()
+        val turnNum = flow.turnIndex.get()
+        val prevPersisted = flow.persistedBytes.get()
+        val delta = (txTotal + rxTotal - prevPersisted).coerceAtLeast(0)
+        val duration = (now - flow.turnStartedAt).coerceAtLeast(1L)
+        val flowHost = flow.hostName
+        val flowUrl = buildUdpUrl(flow, turnNum)
+        val wasInserted = flow.inserted.get()
+
+        if (wasInserted && sid != 0L) {
+            enqueueDbWrite {
+                val pid = holder.packetId
+                if (pid != 0L) {
+                    val repo = (application as NetTraceApp).captureRepository
+                    repo.updateCapturedPacketFlow(
+                        sessionId = sid,
+                        packetId = pid,
+                        host = flowHost,
+                        url = flowUrl,
+                        requestBodyHex = reqHex,
+                        responseBodyHex = respHex,
+                        totalBytesTx = txTotal,
+                        totalBytesRx = rxTotal,
+                        addedBytesDelta = delta,
+                        durationMs = duration
+                    )
+                }
+            }
+        } else if (!wasInserted && liveOnlyDecodableHttp && (txTotal > 0 || rxTotal > 0)) {
+            val skipped = skippedCounter.incrementAndGet()
+            _runtimeState.update { it.copy(skippedNonDecodableCount = skipped) }
+        }
+
+        flow.reqCollector.reset()
+        flow.respCollector.reset()
+        flow.txBytes.set(0)
+        flow.rxBytes.set(0)
+        flow.persistedBytes.set(0)
+        flow.lastFlushAt.set(now)
+        flow.inserted.set(false)
+        flow.packetIdHolder = PacketIdHolder()
+        flow.turnStartedAt = now
+        flow.turnIndex.incrementAndGet()
+    }
+
+    private fun rotateTcpRawTurnLocked(session: TcpFlowSession, host: String, now: Long) {
+        val sid = activeSessionId
+        val holder = session.rawPacketIdHolder
+        val reqHex = cappedHex(session.rawReqCollector.toByteArray())
+        val respHex = cappedHex(session.rawRespCollector.toByteArray())
+        val txTotal = session.rawTxBytes.get()
+        val rxTotal = session.rawRxBytes.get()
+        val turnNum = session.rawTurnIndex.get()
+        val prevPersisted = session.rawPersistedBytes.get()
+        val delta = (txTotal + rxTotal - prevPersisted).coerceAtLeast(0)
+        val duration = (now - session.rawTurnStartedAt).coerceAtLeast(1L)
+        val effectiveHost = host.ifBlank { session.hostName }
+        val flowUrl = buildTcpRawUrl(session.rawIsHttps, effectiveHost, session.serverPort, turnNum)
+        val wasInserted = session.rawInserted.get()
+
+        if (wasInserted && sid != 0L) {
+            enqueueDbWrite {
+                val pid = holder.packetId
+                if (pid != 0L) {
+                    val repo = (application as NetTraceApp).captureRepository
+                    repo.updateCapturedPacketFlow(
+                        sessionId = sid,
+                        packetId = pid,
+                        host = effectiveHost,
+                        url = flowUrl,
+                        requestBodyHex = reqHex,
+                        responseBodyHex = respHex,
+                        totalBytesTx = txTotal,
+                        totalBytesRx = rxTotal,
+                        addedBytesDelta = delta,
+                        durationMs = duration
+                    )
+                }
+            }
+        } else if (!wasInserted && liveOnlyDecodableHttp && (txTotal > 0 || rxTotal > 0)) {
+            val skipped = skippedCounter.incrementAndGet()
+            _runtimeState.update { it.copy(skippedNonDecodableCount = skipped) }
+        }
+
+        session.rawReqCollector.reset()
+        session.rawRespCollector.reset()
+        session.rawTxBytes.set(0)
+        session.rawRxBytes.set(0)
+        session.rawPersistedBytes.set(0)
+        session.rawLastFlushAt.set(now)
+        session.rawInserted.set(false)
+        session.rawPacketIdHolder = PacketIdHolder()
+        session.rawTurnStartedAt = now
+        session.rawTurnIndex.incrementAndGet()
+    }
+
+    private fun appendFlowBytes(out: ByteArrayOutputStream, data: ByteArray) {
+        val room = MAX_RAW_FLOW_CAPTURE_BYTES - out.size()
+        if (room > 0) {
+            out.write(data, 0, minOf(data.size, room))
+        }
+    }
+
+    private fun flushUdpFlowToDb(flow: UdpFlowSocket, force: Boolean) {
+        val sid = activeSessionId
+        if (sid == 0L) return
+
+        val now = System.currentTimeMillis()
+        val prevFlush = flow.lastFlushAt.get()
+        if (!force && (now - prevFlush) < FLOW_DB_FLUSH_INTERVAL_MS) return
+        if (!force && !flow.lastFlushAt.compareAndSet(prevFlush, now)) return
+        if (force) flow.lastFlushAt.set(now)
+
+        val holder: PacketIdHolder
+        val reqHex: String
+        val respHex: String
+        val txTotal: Int
+        val rxTotal: Int
+        val turnNum: Int
+        val duration: Long
+        val wasInserted: Boolean
+        synchronized(flow.flowLock) {
+            wasInserted = flow.inserted.get()
+            holder = flow.packetIdHolder
+            reqHex = cappedHex(flow.reqCollector.toByteArray())
+            respHex = cappedHex(flow.respCollector.toByteArray())
+            txTotal = flow.txBytes.get()
+            rxTotal = flow.rxBytes.get()
+            turnNum = flow.turnIndex.get()
+            duration = (now - flow.turnStartedAt).coerceAtLeast(1L)
+        }
+        if (!wasInserted) return
+        val currentTotal = txTotal + rxTotal
+        val prevPersisted = flow.persistedBytes.getAndSet(currentTotal)
+        val delta = (currentTotal - prevPersisted).coerceAtLeast(0)
+        if (delta == 0 && !force) return
+
+        val flowHost = flow.hostName
+        val flowUrl = buildUdpUrl(flow, turnNum)
+
+        enqueueDbWrite {
+            val pid = holder.packetId
+            if (pid != 0L) {
+                val repo = (application as NetTraceApp).captureRepository
+                repo.updateCapturedPacketFlow(
+                    sessionId = sid,
+                    packetId = pid,
+                    host = flowHost,
+                    url = flowUrl,
+                    requestBodyHex = reqHex,
+                    responseBodyHex = respHex,
+                    totalBytesTx = txTotal,
+                    totalBytesRx = rxTotal,
+                    addedBytesDelta = delta,
+                    durationMs = duration
+                )
+            }
+        }
+    }
+
+    private fun flushTcpRawFlowToDb(session: TcpFlowSession, force: Boolean) {
+        val sid = activeSessionId
+        if (sid == 0L) return
+
+        val now = System.currentTimeMillis()
+        val prevFlush = session.rawLastFlushAt.get()
+        if (!force && (now - prevFlush) < FLOW_DB_FLUSH_INTERVAL_MS) return
+        if (!force && !session.rawLastFlushAt.compareAndSet(prevFlush, now)) return
+        if (force) session.rawLastFlushAt.set(now)
+
+        val holder: PacketIdHolder
+        val reqHex: String
+        val respHex: String
+        val txTotal: Int
+        val rxTotal: Int
+        val turnNum: Int
+        val duration: Long
+        val wasInserted: Boolean
+        synchronized(session.rawLock) {
+            wasInserted = session.rawInserted.get()
+            holder = session.rawPacketIdHolder
+            reqHex = cappedHex(session.rawReqCollector.toByteArray())
+            respHex = cappedHex(session.rawRespCollector.toByteArray())
+            txTotal = session.rawTxBytes.get()
+            rxTotal = session.rawRxBytes.get()
+            turnNum = session.rawTurnIndex.get()
+            duration = (now - session.rawTurnStartedAt).coerceAtLeast(1L)
+        }
+        if (!wasInserted) return
+        val currentTotal = txTotal + rxTotal
+        val prevPersisted = session.rawPersistedBytes.getAndSet(currentTotal)
+        val delta = (currentTotal - prevPersisted).coerceAtLeast(0)
+        if (delta == 0 && !force) return
+
+        val flowHost = session.hostName
+        val flowUrl = buildTcpRawUrl(session.rawIsHttps, flowHost, session.serverPort, turnNum)
+
+        enqueueDbWrite {
+            val pid = holder.packetId
+            if (pid != 0L) {
+                val repo = (application as NetTraceApp).captureRepository
+                repo.updateCapturedPacketFlow(
+                    sessionId = sid,
+                    packetId = pid,
+                    host = flowHost,
+                    url = flowUrl,
+                    requestBodyHex = reqHex,
+                    responseBodyHex = respHex,
+                    totalBytesTx = txTotal,
+                    totalBytesRx = rxTotal,
+                    addedBytesDelta = delta,
+                    durationMs = duration
+                )
             }
         }
     }
@@ -1359,6 +1894,9 @@ class NetTraceVpnService : VpnService() {
 
     private fun closeTcpSession(session: TcpFlowSession) {
         if (!session.closed.compareAndSet(false, true)) return
+        if (session.rawInserted.get()) {
+            flushTcpRawFlowToDb(session, force = true)
+        }
         session.txChannel.close()
         session.tunBridgeReaderJob?.cancel()
         session.txWriterJob?.cancel()
@@ -1389,6 +1927,7 @@ class NetTraceVpnService : VpnService() {
         tcpSessions.values.forEach { closeTcpSession(it) }
         tcpSessions.clear()
         udpSockets.values.forEach {
+            flushUdpFlowToDb(it, force = true)
             it.txChannel.close()
             it.writerJob.cancel()
             it.readerJob.cancel()

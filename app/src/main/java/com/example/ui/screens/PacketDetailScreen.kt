@@ -91,6 +91,8 @@ import com.example.ui.theme.VioletProto
 
 private data class PacketDetailComputed(
     val packetJson: String,
+    val reqDecodedText: String?,
+    val respDecodedText: String?,
     val reqHeaders: Map<String, String>,
     val respHeaders: Map<String, String>,
     val jwtDecoded: JwtDecodeResult?,
@@ -122,6 +124,8 @@ fun PacketDetailScreen(
         value = withContext(Dispatchers.Default) {
             PacketDetailComputed(
                 packetJson = PacketJsonSerializer.packetToFormattedJson(packet),
+                reqDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.requestBodyHex),
+                respDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.responseBodyHex),
                 reqHeaders = PacketJsonSerializer.parseHeadersMap(packet.requestHeadersJson),
                 respHeaders = PacketJsonSerializer.parseHeadersMap(packet.responseHeadersJson),
                 jwtDecoded = JwtDecoder.extractFromHeaders(packet.requestHeadersJson),
@@ -215,12 +219,17 @@ fun PacketDetailScreen(
                         onSendToDecoderLab = onSendToDecoderLab
                     )
                     1 -> JsonTabContent(
-                        packetJson = ready.packetJson,
-                        onCopy = {
+                        packet = packet,
+                        reqDecodedText = ready.reqDecodedText,
+                        respDecodedText = ready.respDecodedText,
+                        reqAnalysis = ready.reqAnalysis,
+                        respAnalysis = ready.respAnalysis,
+                        onCopyAll = {
                             clipboard.setText(AnnotatedString(ready.packetJson))
-                            onCopyToast("Packet JSON copied")
+                            onCopyToast("Combined Request + Response JSON copied")
                         },
-                        onShare = { onShareJson(ready.packetJson) }
+                        onShare = { onShareJson(ready.packetJson) },
+                        onCopyToast = onCopyToast
                     )
                     2 -> HeadersAndHexTabContent(
                         packet = packet,
@@ -338,37 +347,80 @@ private fun DecodeTabContent(
     onCopyToast: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit
 ) {
-    LazyColumn(
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        modifier = Modifier.fillMaxSize()
-    ) {
-        if (jwtDecoded != null) {
-            item {
-                JwtDecodedCard(jwt = jwtDecoded, onCopyToast = onCopyToast)
+    val reqDecodable = reqAnalysis.classification == PayloadClassification.PROTOBUF ||
+        reqAnalysis.classification == PayloadClassification.JSON
+    val respDecodable = respAnalysis.classification == PayloadClassification.PROTOBUF ||
+        respAnalysis.classification == PayloadClassification.JSON
+    var showResponse by remember(packet.id) {
+        mutableStateOf(!reqDecodable && respDecodable)
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        SingleChoiceSegmentedButtonRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .testTag("decode_request_response_switch")
+        ) {
+            SegmentedButton(
+                selected = !showResponse,
+                onClick = { showResponse = false },
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+            ) {
+                Text(
+                    text = if (reqDecodable) "REQUEST (${reqAnalysis.classification.name})" else "REQUEST (${reqAnalysis.byteCount}B)",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            SegmentedButton(
+                selected = showResponse,
+                onClick = { showResponse = true },
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+            ) {
+                Text(
+                    text = if (respDecodable) "RESPONSE (${respAnalysis.classification.name})" else "RESPONSE (${respAnalysis.byteCount}B)",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
 
-        item {
-            PayloadDecodedSection(
-                title = "Response Body Decoder",
-                endpointPath = packet.path,
-                analysis = respAnalysis,
-                rawHex = packet.responseBodyHex,
-                onCopyToast = onCopyToast,
-                onSendToDecoderLab = onSendToDecoderLab
-            )
-        }
-
-        item {
-            PayloadDecodedSection(
-                title = "Request Body Decoder",
-                endpointPath = packet.path,
-                analysis = reqAnalysis,
-                rawHex = packet.requestBodyHex,
-                onCopyToast = onCopyToast,
-                onSendToDecoderLab = onSendToDecoderLab
-            )
+        LazyColumn(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            if (!showResponse) {
+                if (jwtDecoded != null) {
+                    item {
+                        JwtDecodedCard(jwt = jwtDecoded, onCopyToast = onCopyToast)
+                    }
+                }
+                item {
+                    PayloadDecodedSection(
+                        title = "Request Decoded View",
+                        endpointPath = packet.path,
+                        analysis = reqAnalysis,
+                        rawHex = packet.requestBodyHex,
+                        onCopyToast = onCopyToast,
+                        onSendToDecoderLab = onSendToDecoderLab
+                    )
+                }
+            } else {
+                item {
+                    PayloadDecodedSection(
+                        title = "Response Decoded View",
+                        endpointPath = packet.path,
+                        analysis = respAnalysis,
+                        rawHex = packet.responseBodyHex,
+                        onCopyToast = onCopyToast,
+                        onSendToDecoderLab = onSendToDecoderLab
+                    )
+                }
+            }
         }
     }
 }
@@ -581,7 +633,7 @@ fun PayloadDecodedSection(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        listOf("Fields {}", "async def", "Tree", "JSON").forEachIndexed { idx, label ->
+                        listOf("JSON", "Fields {}", "async def", "Tree").forEachIndexed { idx, label ->
                             FilterChip(
                                 selected = protoViewMode == idx,
                                 onClick = { protoViewMode = idx },
@@ -591,22 +643,22 @@ fun PayloadDecodedSection(
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     when (protoViewMode) {
-                        0 -> PythonFieldsCodeBlock(
-                            code = proto.fieldsDictFormatted,
-                            title = "Protobuf Fields Dict",
-                            onCopy = { onCopyToast("Protobuf fields copied") }
-                        )
-                        1 -> PythonFieldsCodeBlock(
-                            code = asyncSnippet,
-                            title = "Async Packet Builder Snippet",
-                            onCopy = { onCopyToast("Async snippet copied") }
-                        )
-                        2 -> ProtobufTreeView(fields = proto.fields)
-                        else -> SyntaxHighlightedJsonBlock(
+                        0 -> SyntaxHighlightedJsonBlock(
                             json = proto.jsonFormatted,
                             title = "Decoded Protobuf JSON",
                             onCopy = { onCopyToast("Protobuf JSON copied") }
                         )
+                        1 -> PythonFieldsCodeBlock(
+                            code = proto.fieldsDictFormatted,
+                            title = "Protobuf Fields Dict",
+                            onCopy = { onCopyToast("Protobuf fields copied") }
+                        )
+                        2 -> PythonFieldsCodeBlock(
+                            code = asyncSnippet,
+                            title = "Async Packet Builder Snippet",
+                            onCopy = { onCopyToast("Async snippet copied") }
+                        )
+                        else -> ProtobufTreeView(fields = proto.fields)
                     }
                 }
 
@@ -637,7 +689,7 @@ fun PayloadDecodedSection(
                 ) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Binary payload (${analysis.byteCount} bytes) — use AES / XOR Key or Open in Lab to decrypt.",
+                        text = "Binary / encrypted payload (${analysis.byteCount} bytes). Open Headers & Hex for raw hex, or decrypt below.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -809,10 +861,16 @@ fun PayloadDecodedSection(
 
 @Composable
 private fun JsonTabContent(
-    packetJson: String,
-    onCopy: () -> Unit,
-    onShare: () -> Unit
+    packet: CapturedPacketEntity,
+    reqDecodedText: String?,
+    respDecodedText: String?,
+    reqAnalysis: PayloadAnalysis,
+    respAnalysis: PayloadAnalysis,
+    onCopyAll: () -> Unit,
+    onShare: () -> Unit,
+    onCopyToast: (String) -> Unit
 ) {
+    val clipboard = LocalClipboardManager.current
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -824,7 +882,7 @@ private fun JsonTabContent(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Button(
-                    onClick = onCopy,
+                    onClick = onCopyAll,
                     modifier = Modifier
                         .weight(1f)
                         .testTag("json_tab_copy_button")
@@ -845,12 +903,123 @@ private fun JsonTabContent(
                 }
             }
         }
+
         item {
-            SyntaxHighlightedJsonBlock(
-                json = packetJson,
-                title = "Decoded Request & Response JSON",
-                onCopy = onCopy
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "API Endpoint",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    SelectionContainer {
+                        Text(
+                            text = "${packet.method} ${packet.url}",
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            SeparateDecodedJsonCard(
+                title = "Request Decoded JSON",
+                decodedText = reqDecodedText,
+                analysis = reqAnalysis,
+                onCopy = { text ->
+                    clipboard.setText(AnnotatedString(text))
+                    onCopyToast("Request decoded JSON copied")
+                }
             )
+        }
+
+        item {
+            SeparateDecodedJsonCard(
+                title = "Response Decoded JSON",
+                decodedText = respDecodedText,
+                analysis = respAnalysis,
+                onCopy = { text ->
+                    clipboard.setText(AnnotatedString(text))
+                    onCopyToast("Response decoded JSON copied")
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SeparateDecodedJsonCard(
+    title: String,
+    decodedText: String?,
+    analysis: PayloadAnalysis,
+    onCopy: (String) -> Unit
+) {
+    if (decodedText != null && (analysis.protobuf != null || analysis.formattedJson != null)) {
+        SyntaxHighlightedJsonBlock(
+            json = decodedText,
+            title = title,
+            onCopy = { onCopy(decodedText) }
+        )
+    } else if (decodedText != null) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { onCopy(decodedText) }, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            AppIcons.ContentCopy,
+                            contentDescription = stringResource(R.string.cd_copy),
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                SelectionContainer {
+                    Text(
+                        text = decodedText,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+        }
+    } else {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = if (analysis.classification == PayloadClassification.EMPTY) {
+                        "Empty body (0 bytes)."
+                    } else {
+                        "No decodable JSON/Protobuf payload (${analysis.byteCount}B binary/encrypted — open Headers & Hex for raw hex)."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }

@@ -10,6 +10,7 @@ import com.example.vpn.MitmCertificateManager
 import com.example.vpn.PacketBuilder
 import com.example.vpn.PacketDissector
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -746,5 +747,177 @@ class VpnMitmTest {
         assertEquals(1, captured.size)
         assertTrue(captured.first().bytesRx > 20_000)
         assertEquals(largeJson, String(HexUtils.hexToBytes(captured.first().responseBodyHex), Charsets.UTF_8))
+    }
+
+    @Test
+    fun `http stream proxy invokes onRawTunnelBytes for raw tcp passthrough streams`() = runTest {
+        val clientOutCapture = ByteArrayOutputStream()
+        val serverOutCapture = ByteArrayOutputStream()
+        val clientPipeIn = PipedInputStream()
+        val clientPipeWriter = PipedOutputStream(clientPipeIn)
+        val serverPipeIn = PipedInputStream()
+        val serverPipeWriter = PipedOutputStream(serverPipeIn)
+
+        val rawTx = ByteArrayOutputStream()
+        val rawRx = ByteArrayOutputStream()
+
+        val relayJob = launch(Dispatchers.IO) {
+            HttpStreamProxy.relayStream(
+                scope = this,
+                clientIn = clientPipeIn,
+                clientOut = clientOutCapture,
+                serverIn = serverPipeIn,
+                serverOut = serverOutCapture,
+                initialClientBytes = byteArrayOf(0x16, 0x03, 0x01),
+                isHttps = true,
+                defaultHost = "game.tcp.example",
+                port = 9001,
+                callbacks = object : HttpCaptureCallbacks {
+                    override fun onHttpRequest(meta: CapturedHttpRequestMeta) = Unit
+                    override fun onHttpResponse(
+                        meta: CapturedHttpRequestMeta,
+                        statusCode: Int?,
+                        responseHeadersJson: String,
+                        responseBodyHex: String,
+                        bytesRx: Int,
+                        durationMs: Long
+                    ) = Unit
+                    override fun onRawTunnelBytes(
+                        isHttps: Boolean,
+                        host: String,
+                        port: Int,
+                        reqBytes: ByteArray?,
+                        respBytes: ByteArray?
+                    ) {
+                        reqBytes?.let { synchronized(rawTx) { rawTx.write(it) } }
+                        respBytes?.let { synchronized(rawRx) { rawRx.write(it) } }
+                    }
+                    override fun onBytesTransferred(bytes: Int) = Unit
+                },
+                skipHttpPeek = true
+            )
+        }
+
+        clientPipeWriter.write(byteArrayOf(0x00, 0x05))
+        clientPipeWriter.flush()
+        serverPipeWriter.write(byteArrayOf(0x08, 0x01))
+        serverPipeWriter.flush()
+        Thread.sleep(50)
+        clientPipeWriter.close()
+        serverPipeWriter.close()
+        relayJob.join()
+
+        assertEquals("1603010005", HexUtils.bytesToHex(rawTx.toByteArray()))
+        assertEquals("0801", HexUtils.bytesToHex(rawRx.toByteArray()))
+    }
+
+    @Test
+    fun `user preferences defaults vpnFullPacketMode true while preserving target package`() = runTest {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = com.example.data.prefs.UserPreferencesRepository(ctx)
+        prefs.setTargetApp("com.dts.freefireth", "Free Fire", 10240)
+        val snap1 = prefs.settingsFlow.first()
+        assertTrue(snap1.vpnFullPacketMode)
+        assertEquals("com.dts.freefireth", snap1.targetApp.packageName)
+
+        prefs.setVpnFullPacketMode(false)
+        val snap2 = prefs.settingsFlow.first()
+        assertTrue(!snap2.vpnFullPacketMode)
+        assertEquals("com.dts.freefireth", snap2.targetApp.packageName)
+
+        prefs.setVpnFullPacketMode(true)
+        val snap3 = prefs.settingsFlow.first()
+        assertTrue(snap3.vpnFullPacketMode)
+    }
+
+    @Test
+    fun `http stream proxy relays websocket 101 upgrade frames via onRawTunnelBytes`() = runTest {
+        val clientOutCapture = ByteArrayOutputStream()
+        val serverOutCapture = ByteArrayOutputStream()
+        val clientPipeIn = PipedInputStream()
+        val clientPipeWriter = PipedOutputStream(clientPipeIn)
+        val serverPipeIn = PipedInputStream()
+        val serverPipeWriter = PipedOutputStream(serverPipeIn)
+
+        val capturedReqs = mutableListOf<CapturedHttpRequestMeta>()
+        val capturedStatuses = mutableListOf<Int?>()
+        val rawTx = ByteArrayOutputStream()
+        val rawRx = ByteArrayOutputStream()
+
+        val relayJob = launch(Dispatchers.IO) {
+            HttpStreamProxy.relayStream(
+                scope = this,
+                clientIn = clientPipeIn,
+                clientOut = clientOutCapture,
+                serverIn = serverPipeIn,
+                serverOut = serverOutCapture,
+                initialClientBytes = ByteArray(0),
+                isHttps = true,
+                defaultHost = "ws.game.example",
+                port = 443,
+                callbacks = object : HttpCaptureCallbacks {
+                    override fun onHttpRequest(meta: CapturedHttpRequestMeta) {
+                        synchronized(capturedReqs) { capturedReqs.add(meta) }
+                    }
+                    override fun onHttpResponse(
+                        meta: CapturedHttpRequestMeta,
+                        statusCode: Int?,
+                        responseHeadersJson: String,
+                        responseBodyHex: String,
+                        bytesRx: Int,
+                        durationMs: Long
+                    ) {
+                        synchronized(capturedStatuses) { capturedStatuses.add(statusCode) }
+                    }
+                    override fun onRawTunnelBytes(
+                        isHttps: Boolean,
+                        host: String,
+                        port: Int,
+                        reqBytes: ByteArray?,
+                        respBytes: ByteArray?
+                    ) {
+                        reqBytes?.let { synchronized(rawTx) { rawTx.write(it) } }
+                        respBytes?.let { synchronized(rawRx) { rawRx.write(it) } }
+                    }
+                    override fun onBytesTransferred(bytes: Int) = Unit
+                }
+            )
+        }
+
+        val upgradeReq = (
+            "GET /lobby HTTP/1.1\r\n" +
+                "Host: ws.game.example\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n\r\n"
+            ).toByteArray(Charsets.ISO_8859_1)
+        val upgradeResp = (
+            "HTTP/1.1 101 Switching Protocols\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n\r\n"
+            ).toByteArray(Charsets.ISO_8859_1)
+
+        clientPipeWriter.write(upgradeReq)
+        clientPipeWriter.flush()
+        Thread.sleep(60)
+
+        serverPipeWriter.write(upgradeResp)
+        serverPipeWriter.flush()
+        Thread.sleep(60)
+
+        // Subsequent WebSocket frames after 101 upgrade
+        serverPipeWriter.write(byteArrayOf(0x81.toByte(), 0x02, 0x4F, 0x4B))
+        serverPipeWriter.flush()
+        clientPipeWriter.write(byteArrayOf(0x82.toByte(), 0x02, 0x08, 0x01))
+        clientPipeWriter.flush()
+        Thread.sleep(80)
+
+        clientPipeWriter.close()
+        serverPipeWriter.close()
+        relayJob.join()
+
+        assertEquals(1, capturedReqs.size)
+        assertEquals(listOf(101), capturedStatuses)
+        assertEquals("82020801", HexUtils.bytesToHex(rawTx.toByteArray()))
+        assertEquals("81024f4b", HexUtils.bytesToHex(rawRx.toByteArray()))
     }
 }

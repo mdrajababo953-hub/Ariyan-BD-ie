@@ -84,6 +84,7 @@ import com.example.ui.components.AppIcons
 import com.example.ui.components.Formatters
 import com.example.ui.components.PacketRowCard
 import com.example.ui.components.TagChip
+import com.example.ui.theme.AmberSignal
 import com.example.ui.theme.CoralAlert
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
@@ -109,16 +110,20 @@ fun CaptureDashboardScreen(
     onlyDecodableHttp: Boolean,
     proxyState: LocalProxyRuntimeState,
     targetApp: TargetAppSelection,
+    vpnFullPacketMode: Boolean,
     targetAppInfo: InstalledAppInfo?,
     vpnState: VpnRuntimeState,
     activeSession: CaptureSessionEntity?,
     packets: List<CapturedPacketEntity>,
+    totalPacketCount: Int,
     selectedPacket: CapturedPacketEntity?,
     searchQuery: String,
     activeFilter: PacketFilterChip,
     httpsMitmEnabled: Boolean,
     caReady: Boolean,
+    caTrusted: Boolean,
     onModeChange: (CaptureEngineMode) -> Unit,
+    onToggleVpnFullPacket: (Boolean) -> Unit,
     onStartLocalProxy: (Int, String) -> Unit,
     onStopLocalProxy: () -> Unit,
     onUpdateForwardUrl: (String) -> Unit,
@@ -193,16 +198,20 @@ fun CaptureDashboardScreen(
                     onlyDecodableHttp = onlyDecodableHttp,
                     proxyState = proxyState,
                     targetApp = targetApp,
+                    vpnFullPacketMode = vpnFullPacketMode,
                     targetAppInfo = targetAppInfo,
                     vpnState = vpnState,
                     activeSession = activeSession,
                     packets = packets,
+                    totalPacketCount = totalPacketCount,
                     selectedPacketId = selectedPacket?.id,
                     searchQuery = searchQuery,
                     activeFilter = activeFilter,
                     httpsMitmEnabled = httpsMitmEnabled,
                     caReady = caReady,
+                    caTrusted = caTrusted,
                     onModeChange = onModeChange,
+                    onToggleVpnFullPacket = onToggleVpnFullPacket,
                     onStartLocalProxy = onStartLocalProxy,
                     onStopLocalProxy = onStopLocalProxy,
                     onUpdateForwardUrl = onUpdateForwardUrl,
@@ -255,16 +264,20 @@ fun CaptureDashboardScreen(
                 onlyDecodableHttp = onlyDecodableHttp,
                 proxyState = proxyState,
                 targetApp = targetApp,
+                vpnFullPacketMode = vpnFullPacketMode,
                 targetAppInfo = targetAppInfo,
                 vpnState = vpnState,
                 activeSession = activeSession,
                 packets = packets,
+                totalPacketCount = totalPacketCount,
                 selectedPacketId = selectedPacket?.id,
                 searchQuery = searchQuery,
                 activeFilter = activeFilter,
                 httpsMitmEnabled = httpsMitmEnabled,
                 caReady = caReady,
+                caTrusted = caTrusted,
                 onModeChange = onModeChange,
+                onToggleVpnFullPacket = onToggleVpnFullPacket,
                 onStartLocalProxy = onStartLocalProxy,
                 onStopLocalProxy = onStopLocalProxy,
                 onUpdateForwardUrl = onUpdateForwardUrl,
@@ -299,16 +312,20 @@ private fun CaptureListPane(
     onlyDecodableHttp: Boolean,
     proxyState: LocalProxyRuntimeState,
     targetApp: TargetAppSelection,
+    vpnFullPacketMode: Boolean,
     targetAppInfo: InstalledAppInfo?,
     vpnState: VpnRuntimeState,
     activeSession: CaptureSessionEntity?,
     packets: List<CapturedPacketEntity>,
+    totalPacketCount: Int,
     selectedPacketId: Long?,
     searchQuery: String,
     activeFilter: PacketFilterChip,
     httpsMitmEnabled: Boolean,
     caReady: Boolean,
+    caTrusted: Boolean,
     onModeChange: (CaptureEngineMode) -> Unit,
+    onToggleVpnFullPacket: (Boolean) -> Unit,
     onStartLocalProxy: (Int, String) -> Unit,
     onStopLocalProxy: () -> Unit,
     onUpdateForwardUrl: (String) -> Unit,
@@ -382,13 +399,14 @@ private fun CaptureListPane(
             } else {
                 TargetIsolationHeroCard(
                     targetApp = targetApp,
+                    vpnFullPacketMode = vpnFullPacketMode,
                     targetAppInfo = targetAppInfo,
                     vpnState = vpnState,
                     httpsMitmEnabled = httpsMitmEnabled,
-                    onlyDecodableHttp = onlyDecodableHttp,
                     caReady = caReady,
+                    caTrusted = caTrusted,
+                    onToggleVpnFullPacket = onToggleVpnFullPacket,
                     onToggleHttpsMitm = onToggleHttpsMitm,
-                    onToggleOnlyDecodable = onToggleOnlyDecodable,
                     onInstallCaCert = onInstallCaCert,
                     onSaveCaCert = onSaveCaCert,
                     onOpenTargetPicker = onOpenTargetPicker,
@@ -473,6 +491,9 @@ private fun CaptureListPane(
                     captureMode = captureMode,
                     isRunning = anyEngineRunning,
                     proxyPort = if (proxyState.isRunning) proxyState.port else proxyPort,
+                    activeFilter = activeFilter,
+                    totalPacketCount = totalPacketCount,
+                    onFilterChange = onFilterChange,
                     onOpenImportDialog = onOpenImportDialog
                 )
             }
@@ -673,20 +694,34 @@ private fun LocalProxyHeroCard(
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 FilterChip(
                     selected = onlyDecodableHttp,
-                    onClick = { onToggleOnlyDecodable(!onlyDecodableHttp) },
+                    onClick = { onToggleOnlyDecodable(true) },
                     label = {
                         Text(
-                            text = if (onlyDecodableHttp) "Decodable JSON/Proto Only" else "Save All HTTP",
-                            style = MaterialTheme.typography.labelSmall
+                            text = "Decodable HTTP",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1
                         )
                     },
                     modifier = Modifier.testTag("only_decodable_toggle")
                 )
+                FilterChip(
+                    selected = !onlyDecodableHttp,
+                    onClick = { onToggleOnlyDecodable(false) },
+                    label = {
+                        Text(
+                            text = "Full Packet (All)",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1
+                        )
+                    },
+                    modifier = Modifier.testTag("all_packets_toggle")
+                )
+                Spacer(modifier = Modifier.weight(1f))
                 if (proxyState.skippedNonDecodableCount > 0) {
                     Text(
                         text = "${proxyState.skippedNonDecodableCount} skipped",
@@ -702,13 +737,14 @@ private fun LocalProxyHeroCard(
 @Composable
 private fun TargetIsolationHeroCard(
     targetApp: TargetAppSelection,
+    vpnFullPacketMode: Boolean,
     targetAppInfo: InstalledAppInfo?,
     vpnState: VpnRuntimeState,
     httpsMitmEnabled: Boolean,
-    onlyDecodableHttp: Boolean,
     caReady: Boolean,
+    caTrusted: Boolean,
+    onToggleVpnFullPacket: (Boolean) -> Unit,
     onToggleHttpsMitm: (Boolean) -> Unit,
-    onToggleOnlyDecodable: (Boolean) -> Unit,
     onInstallCaCert: () -> Unit,
     onSaveCaCert: () -> Unit,
     onOpenTargetPicker: () -> Unit,
@@ -778,13 +814,13 @@ private fun TargetIsolationHeroCard(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     TagChip(
-                        text = if (isLive) "LIVE CAPTURE" else "PER-APP ISOLATED",
+                        text = if (isLive) "LIVE TARGET PACKETS" else "PER-APP ISOLATED",
                         color = accentColor,
                         icon = if (isLive) AppIcons.Radar else AppIcons.Shield
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     Text(
-                        text = "VPN TUN • NO ROOT",
+                        text = if (vpnFullPacketMode) "FULL PACKET • NO ROOT" else "DECODABLE • NO ROOT",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -811,7 +847,7 @@ private fun TargetIsolationHeroCard(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = targetApp.packageName.ifBlank { "Tap Target App to pick a game/app" },
+                            text = targetApp.packageName.ifBlank { "Tap Target App to pick your game/app" },
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary,
                             maxLines = 1,
@@ -888,6 +924,7 @@ private fun TargetIsolationHeroCard(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
                     ) {
+                        val effectiveCaTrusted = vpnState.caTrusted || caTrusted
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -929,7 +966,11 @@ private fun TargetIsolationHeroCard(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = if (caReady) "Trust CA" else "Install CA",
+                                    text = when {
+                                        effectiveCaTrusted -> "CA Trusted"
+                                        caReady -> "CA Settings"
+                                        else -> "Install CA"
+                                    },
                                     style = MaterialTheme.typography.labelMedium
                                 )
                             }
@@ -951,40 +992,58 @@ private fun TargetIsolationHeroCard(
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             FilterChip(
-                                selected = onlyDecodableHttp,
-                                enabled = !isLive,
-                                onClick = { onToggleOnlyDecodable(!onlyDecodableHttp) },
+                                selected = vpnFullPacketMode,
+                                onClick = { onToggleVpnFullPacket(true) },
                                 label = {
                                     Text(
-                                        text = if (onlyDecodableHttp) "Decodable JSON/Proto Only" else "Save All HTTP",
-                                        style = MaterialTheme.typography.labelSmall
+                                        text = "Full Packet (All)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1
+                                    )
+                                },
+                                modifier = Modifier.testTag("vpn_full_packet_toggle")
+                            )
+                            FilterChip(
+                                selected = !vpnFullPacketMode,
+                                onClick = { onToggleVpnFullPacket(false) },
+                                label = {
+                                    Text(
+                                        text = "Decodable Only",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1
                                     )
                                 },
                                 modifier = Modifier.testTag("vpn_only_decodable_toggle")
                             )
-                            if (vpnState.skippedNonDecodableCount > 0) {
-                                Text(
-                                    text = "${vpnState.skippedNonDecodableCount} skipped",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                            Spacer(modifier = Modifier.weight(1f))
+                            TagChip(
+                                text = if (effectiveCaTrusted) "CA OK" else "Trust CA",
+                                color = if (effectiveCaTrusted) EmeraldPulse else AmberSignal
+                            )
+                        }
+
+                        if (vpnState.skippedNonDecodableCount > 0) {
+                            Text(
+                                text = "${vpnState.skippedNonDecodableCount} non-decodable stream(s) skipped in Decodable Only mode",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
 
                         Text(
                             text = when {
-                                vpnState.isRunning && !vpnState.caTrusted ->
-                                    "TCP/UDP passes normally. Trust NetTrace CA for HTTPS MITM or use Local Proxy (:8080) if pinned."
+                                vpnState.isRunning && !effectiveCaTrusted ->
+                                    "Capturing in-game HTTP, TCP/TLS & UDP turns live for ${targetApp.appName.ifBlank { "target app" }}. Tap CA Settings for HTTPS body decrypt."
                                 vpnState.isRunning && vpnState.pinningBypassCount > 0 ->
-                                    "HTTPS MITM active (${vpnState.pinningBypassCount} pinned host(s) passed through untouched)."
+                                    "Capturing HTTP + in-game TCP/UDP/TLS turns (${vpnState.pinningBypassCount} pinned stream(s) with full TX/RX passthrough)."
                                 vpnState.isRunning && vpnState.mitmActive ->
-                                    "HTTPS MITM active — capturing HTTP/HTTPS directly from ${targetApp.appName} without config edits."
+                                    "Full capture active (HTTPS MITM + WebSocket + in-game TCP/UDP) for ${targetApp.appName.ifBlank { "target app" }}."
                                 else ->
-                                    "Captures only decodable HTTP/HTTPS endpoints; UDP/TCP streams stay unblocked."
+                                    "Captures every in-game request, response & push (HTTP/HTTPS, WebSocket, TCP, UDP) for your selected Target App."
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1121,8 +1180,12 @@ private fun EmptyPacketsState(
     captureMode: CaptureEngineMode,
     isRunning: Boolean,
     proxyPort: Int,
+    activeFilter: PacketFilterChip,
+    totalPacketCount: Int,
+    onFilterChange: (PacketFilterChip) -> Unit,
     onOpenImportDialog: () -> Unit
 ) {
+    val hasHiddenPackets = activeFilter == PacketFilterChip.HTTP_HTTPS && totalPacketCount > 0
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -1148,16 +1211,22 @@ private fun EmptyPacketsState(
             }
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = if (isRunning) "Waiting for Decodable HTTP Traffic..." else "No Captured Traffic Yet",
+                text = when {
+                    hasHiddenPackets -> "No HTTP/S Requests Matched"
+                    isRunning -> "Waiting for Traffic..."
+                    else -> "No Captured Traffic Yet"
+                },
                 style = MaterialTheme.typography.titleMedium
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = when {
+                    hasHiddenPackets ->
+                        "$totalPacketCount TCP/UDP or other packet(s) captured in this session. Tap below to inspect all packets."
                     isRunning && captureMode == CaptureEngineMode.LOCAL_PROXY ->
                         "Proxy active on http://127.0.0.1:$proxyPort. Launch your game using Local Config to capture decoded endpoints."
                     isRunning ->
-                        "Open your target app. Only decodable JSON/Protobuf HTTP requests appear here; TCP/UDP stays unblocked."
+                        "Open your target app to capture HTTP/HTTPS, TCP, and UDP packets."
                     captureMode == CaptureEngineMode.LOCAL_PROXY ->
                         "Select IND or BD server, tap START PROXY, and point your game config to http://127.0.0.1:$proxyPort."
                     else ->
@@ -1166,7 +1235,17 @@ private fun EmptyPacketsState(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (!isRunning) {
+            if (hasHiddenPackets) {
+                Spacer(modifier = Modifier.height(12.dp))
+                FilledTonalButton(
+                    onClick = { onFilterChange(PacketFilterChip.ALL) },
+                    modifier = Modifier.testTag("show_all_packets_empty_button")
+                ) {
+                    Icon(AppIcons.Radar, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Show $totalPacketCount Packets")
+                }
+            } else if (!isRunning) {
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedButton(onClick = onOpenImportDialog) {
                     Icon(AppIcons.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))

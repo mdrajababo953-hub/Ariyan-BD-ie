@@ -140,6 +140,7 @@ object HttpStreamProxy {
 
         val pendingQueue = Channel<CapturedHttpRequestMeta>(capacity = 64)
         val bufferedServer = java.io.BufferedInputStream(serverIn, 16384)
+        val upgradedToRaw = java.util.concurrent.atomic.AtomicBoolean(false)
 
         val responseJob: Job = scope.launch(ioDispatcher) {
             try {
@@ -156,12 +157,38 @@ object HttpStreamProxy {
                         break
                     }
 
-                    // 100 Continue / 1xx informational responses precede the actual final response
+                    // 100 Continue / 1xx informational responses (except 101 WebSocket upgrade) precede the final response
                     if (parsed.statusCode in 100..199 && parsed.statusCode != 101) {
                         continue
                     }
 
                     val pendingReq = pendingQueue.receiveCatching().getOrNull()
+                    if (parsed.statusCode == 101) {
+                        if (pendingReq != null) {
+                            callbacks.onHttpResponse(
+                                meta = pendingReq,
+                                statusCode = 101,
+                                responseHeadersJson = parsed.headersJson,
+                                responseBodyHex = "",
+                                bytesRx = headerBytes.size,
+                                durationMs = (System.currentTimeMillis() - pendingReq.startedAt).coerceAtLeast(1L)
+                            )
+                        }
+                        upgradedToRaw.set(true)
+                        val hostForWs = pendingReq?.host ?: defaultHost
+                        val wsBuf = ByteArray(8192)
+                        while (isActive) {
+                            val n = bufferedServer.read(wsBuf)
+                            if (n <= 0) break
+                            val slice = wsBuf.copyOfRange(0, n)
+                            clientOut.write(slice)
+                            clientOut.flush()
+                            callbacks.onBytesTransferred(n)
+                            callbacks.onRawTunnelBytes(isHttps, hostForWs, port, reqBytes = null, respBytes = slice)
+                        }
+                        break
+                    }
+
                     val isRespCompressed = !parsed.contentEncoding.isNullOrBlank() &&
                         (parsed.contentEncoding.contains("gzip", true) || parsed.contentEncoding.contains("deflate", true))
                     val bodyCollector = BoundedByteCollector(
@@ -212,13 +239,40 @@ object HttpStreamProxy {
 
         try {
             while (scope.isActive) {
+                if (upgradedToRaw.get()) {
+                    val wsBuf = ByteArray(8192)
+                    while (scope.isActive) {
+                        val n = bufferedClient.read(wsBuf)
+                        if (n <= 0) break
+                        val slice = wsBuf.copyOfRange(0, n)
+                        serverOut.write(slice)
+                        serverOut.flush()
+                        callbacks.onBytesTransferred(n)
+                        callbacks.onRawTunnelBytes(isHttps, defaultHost, port, reqBytes = slice, respBytes = null)
+                    }
+                    break
+                }
                 val headerBytes = readHeaderBlock(bufferedClient) ?: break
                 val reqHeader = parseRequestHeader(headerBytes, defaultHost)
                 if (reqHeader == null) {
                     serverOut.write(headerBytes)
                     serverOut.flush()
                     callbacks.onBytesTransferred(headerBytes.size)
-                    drainRaw(bufferedClient, serverOut, callbacks)
+                    if (upgradedToRaw.get()) {
+                        callbacks.onRawTunnelBytes(isHttps, defaultHost, port, reqBytes = headerBytes, respBytes = null)
+                        val wsBuf = ByteArray(8192)
+                        while (scope.isActive) {
+                            val n = bufferedClient.read(wsBuf)
+                            if (n <= 0) break
+                            val slice = wsBuf.copyOfRange(0, n)
+                            serverOut.write(slice)
+                            serverOut.flush()
+                            callbacks.onBytesTransferred(n)
+                            callbacks.onRawTunnelBytes(isHttps, defaultHost, port, reqBytes = slice, respBytes = null)
+                        }
+                    } else {
+                        drainRaw(bufferedClient, serverOut, callbacks)
+                    }
                     break
                 }
 

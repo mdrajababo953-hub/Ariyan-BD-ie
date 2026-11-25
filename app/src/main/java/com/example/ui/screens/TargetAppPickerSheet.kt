@@ -102,7 +102,7 @@ fun TargetAppPickerSheet(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Only this app's traffic routes through the VPN tunnel",
+                        text = "Only selected app traffic routes through NetTrace VPN",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

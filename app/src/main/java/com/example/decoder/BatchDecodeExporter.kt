@@ -45,13 +45,19 @@ object BatchDecodeExporter {
                 val decodable = PayloadAnalyzer.hasDecodablePayload(pkt.requestBodyHex, pkt.responseBodyHex)
                 isHttpProto && !isRawTls && !(pkt.method.equals("SYN", true) || (pkt.path == "/Passthrough" && looksRawTlsHex)) && decodable
             }
-            FullDecodeScope.UDP_DNS -> packets.filter {
-                it.protocol.equals("UDP", true) || it.protocol.equals("DNS", true)
+            FullDecodeScope.UDP_DNS -> packets.filter { pkt ->
+                (pkt.protocol.equals("UDP", true) || pkt.protocol.equals("DNS", true)) &&
+                    PayloadAnalyzer.hasDecodablePayload(pkt.requestBodyHex, pkt.responseBodyHex)
             }
-            FullDecodeScope.TCP -> packets.filter {
-                it.protocol.equals("TCP", true) || it.protocol.equals("HTTP", true) || it.protocol.equals("HTTPS", true)
+            FullDecodeScope.TCP -> packets.filter { pkt ->
+                val isTcpScope = pkt.protocol.equals("TCP", true) || pkt.protocol.equals("HTTP", true) || pkt.protocol.equals("HTTPS", true)
+                val isRawTls = pkt.method.equals("TLS", true) || pkt.method.equals("TLS_PIN", true) || pkt.method.equals("SYN", true)
+                isTcpScope && !isRawTls && PayloadAnalyzer.hasDecodablePayload(pkt.requestBodyHex, pkt.responseBodyHex)
             }
-            FullDecodeScope.ALL -> packets
+            FullDecodeScope.ALL -> packets.filter { pkt ->
+                val isRawTls = pkt.method.equals("TLS", true) || pkt.method.equals("TLS_PIN", true) || pkt.method.equals("SYN", true)
+                !isRawTls && PayloadAnalyzer.hasDecodablePayload(pkt.requestBodyHex, pkt.responseBodyHex)
+            }
         }
     }
 
@@ -65,7 +71,7 @@ object BatchDecodeExporter {
         runCatching {
             val matching = filterPacketsByScope(packets, scope)
             require(matching.isNotEmpty()) {
-                "No ${scope.label} packets found in this session to decode."
+                "No decodable ${scope.label} payloads found in this session."
             }
 
             val total = matching.size
@@ -73,7 +79,14 @@ object BatchDecodeExporter {
 
             matching.forEachIndexed { index, pkt ->
                 onProgress(index + 1, total)
-                requestsArray.put(PacketJsonSerializer.packetToJsonObject(pkt))
+                val item = PacketJsonSerializer.packetToJsonObject(pkt)
+                if (!item.isNull("request") || !item.isNull("response")) {
+                    requestsArray.put(item)
+                }
+            }
+
+            require(requestsArray.length() > 0) {
+                "No decodable ${scope.label} payloads found in this session."
             }
 
             val tsFmt = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
@@ -85,7 +98,7 @@ object BatchDecodeExporter {
             FullDecodeResult(
                 fileName = fileName,
                 displayPath = displayPath,
-                decodedCount = total,
+                decodedCount = requestsArray.length(),
                 jsonContent = rootJson,
                 savedUri = savedUri
             )

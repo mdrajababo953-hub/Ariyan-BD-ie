@@ -47,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,6 +64,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.AppIcons
@@ -125,7 +129,20 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
     val decoderLabState by vm.decoderLab.collectAsStateWithLifecycle()
     val fullDecodeState by vm.fullDecodeState.collectAsStateWithLifecycle()
     val caReady by vm.caReady.collectAsStateWithLifecycle()
+    val caTrusted by vm.caTrusted.collectAsStateWithLifecycle()
+    val totalPacketCount by vm.totalSessionPacketCount.collectAsStateWithLifecycle()
     val snackbarMsg by vm.snackbarMessage.collectAsStateWithLifecycle()
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                vm.refreshCaTrustStatus()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     var currentTab by remember { mutableStateOf(MainTab.CAPTURE) }
     var showTargetPicker by remember { mutableStateOf(false) }
@@ -181,21 +198,52 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
     val caInstallLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        vm.refreshCaTrustStatus()
         if (result.resultCode == Activity.RESULT_OK) {
             coroutineScope.launch {
                 snackbarHostState.showSnackbar("NetTrace Proxy CA installed — HTTPS decryption ready.")
             }
         } else {
             coroutineScope.launch {
-                snackbarHostState.showSnackbar("Tip: Use Save CA button and install via Settings → Security → CA certificate.")
+                snackbarHostState.showSnackbar("Saved NetTrace_Proxy_CA.crt in Documents/Aryan — Security → CA certificate.")
             }
         }
     }
 
     val launchCaInstall: () -> Unit = {
-        vm.prepareCaInstallIntent { intent ->
-            runCatching { caInstallLauncher.launch(intent) }
-                .onFailure { vm.saveCaCertToAryan() }
+        vm.prepareDirectCaInstall { intents, savedPath ->
+            var launchedKeyChain = false
+            var openedSettings = false
+            for (intent in intents) {
+                val isKeyChain = intent.action == "android.security.action.INSTALL" ||
+                    intent.component?.className?.contains("KeyChain", ignoreCase = true) == true
+                val started = if (isKeyChain) {
+                    runCatching {
+                        caInstallLauncher.launch(intent)
+                        launchedKeyChain = true
+                        true
+                    }.getOrDefault(false)
+                } else {
+                    runCatching {
+                        context.startActivity(intent)
+                        openedSettings = true
+                        true
+                    }.getOrDefault(false)
+                }
+                if (started) break
+            }
+            if (!launchedKeyChain) {
+                coroutineScope.launch {
+                    val pathNote = savedPath ?: "Documents/Aryan/NetTrace_Proxy_CA.crt"
+                    snackbarHostState.showSnackbar(
+                        if (openedSettings) {
+                            "Saved $pathNote — open Encryption & credentials → Install a certificate → CA certificate"
+                        } else {
+                            "Saved $pathNote — install via Settings → Security → CA certificate"
+                        }
+                    )
+                }
+            }
         }
     }
 
@@ -476,16 +524,20 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                     onlyDecodableHttp = settings.onlyDecodableHttp,
                                     proxyState = proxyState,
                                     targetApp = settings.targetApp,
+                                    vpnFullPacketMode = settings.vpnFullPacketMode,
                                     targetAppInfo = targetAppInfo,
                                     vpnState = vpnState,
                                     activeSession = activeSession,
                                     packets = packets,
+                                    totalPacketCount = totalPacketCount,
                                     selectedPacket = selectedPacket,
                                     searchQuery = searchQuery,
                                     activeFilter = filterChip,
                                     httpsMitmEnabled = settings.httpsMitmEnabled,
                                     caReady = caReady,
+                                    caTrusted = caTrusted,
                                     onModeChange = vm::setCaptureMode,
+                                    onToggleVpnFullPacket = vm::toggleVpnFullPacket,
                                     onStartLocalProxy = startProxyWithPermissions,
                                     onStopLocalProxy = vm::stopLocalProxy,
                                     onUpdateForwardUrl = vm::setForwardBaseUrl,

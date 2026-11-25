@@ -96,6 +96,33 @@ class CaptureRepository(private val db: NetTraceDatabase) {
         }
     }
 
+    suspend fun updateCapturedPacketFlow(
+        sessionId: Long,
+        packetId: Long,
+        host: String,
+        url: String,
+        requestBodyHex: String,
+        responseBodyHex: String,
+        totalBytesTx: Int,
+        totalBytesRx: Int,
+        addedBytesDelta: Int,
+        durationMs: Long
+    ) {
+        packetDao.updatePacketFlow(
+            packetId = packetId,
+            host = host,
+            url = url,
+            requestBodyHex = requestBodyHex,
+            responseBodyHex = responseBodyHex,
+            bytesTx = totalBytesTx,
+            bytesRx = totalBytesRx,
+            durationMs = durationMs
+        )
+        if (addedBytesDelta > 0) {
+            sessionDao.addSessionBytes(sessionId, addedBytesDelta.toLong())
+        }
+    }
+
     suspend fun deletePacket(packet: CapturedPacketEntity) {
         packetDao.deletePacketById(packet.id)
         val bytes = (packet.bytesTx + packet.bytesRx).toLong()

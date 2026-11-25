@@ -92,6 +92,23 @@ interface CapturedPacketDao {
         durationMs: Long
     )
 
+    @Query(
+        "UPDATE captured_packets SET host = :host, url = :url, " +
+            "requestBodyHex = :requestBodyHex, responseBodyHex = :responseBodyHex, " +
+            "bytesTx = :bytesTx, bytesRx = :bytesRx, durationMs = :durationMs " +
+            "WHERE id = :packetId"
+    )
+    suspend fun updatePacketFlow(
+        packetId: Long,
+        host: String,
+        url: String,
+        requestBodyHex: String,
+        responseBodyHex: String,
+        bytesTx: Int,
+        bytesRx: Int,
+        durationMs: Long
+    )
+
     @Query("DELETE FROM captured_packets WHERE id = :packetId")
     suspend fun deletePacketById(packetId: Long)
 

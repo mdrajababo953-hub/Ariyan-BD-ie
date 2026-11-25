@@ -75,6 +75,13 @@ class LocalForwardProxyService : Service() {
             }
         }
 
+        @Volatile
+        private var liveOnlyDecodableFilter: Boolean = true
+
+        fun updateFilter(onlyDecodable: Boolean) {
+            liveOnlyDecodableFilter = onlyDecodable
+        }
+
         fun stopProxy(context: Context) {
             val intent = Intent(context, LocalForwardProxyService::class.java).apply {
                 action = ACTION_STOP
@@ -130,6 +137,7 @@ class LocalForwardProxyService : Service() {
         stopProxyEngine(keepForeground = true)
         currentPort = port
         currentForwardUrl = forwardUrl
+        liveOnlyDecodableFilter = onlyDecodable
         onlyDecodableFilter = onlyDecodable
         capturedCounter.set(0)
         skippedCounter.set(0)
@@ -162,7 +170,7 @@ class LocalForwardProxyService : Service() {
                     val sid = activeSessionId
                     if (sid == 0L) return@LocalForwardProxyEngine
 
-                    val shouldSave = !onlyDecodableFilter ||
+                    val shouldSave = !liveOnlyDecodableFilter ||
                         PayloadAnalyzer.hasDecodablePayload(tx.requestBodyHex, tx.responseBodyHex)
 
                     if (!shouldSave) {

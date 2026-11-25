@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -48,10 +49,11 @@ import kotlinx.coroutines.withContext
 
 enum class PacketFilterChip(val label: String) {
     HTTP_HTTPS("HTTP/S"),
-    ALL("All"),
+    ALL("All Packets"),
+    TCP("TCP"),
+    DNS_UDP("UDP/DNS"),
     PROTOBUF("Protobuf"),
-    BLOCKED("Blocked"),
-    DNS_UDP("DNS/UDP")
+    BLOCKED("Blocked")
 }
 
 data class FullDecodeUiState(
@@ -137,6 +139,9 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     private val _caReady = MutableStateFlow(false)
     val caReady: StateFlow<Boolean> = _caReady.asStateFlow()
 
+    private val _caTrusted = MutableStateFlow(false)
+    val caTrusted: StateFlow<Boolean> = _caTrusted.asStateFlow()
+
     private val _decoderLab = MutableStateFlow(
         DecoderLabState(
             inputText = "08f4f3c8cf3d102618ad0220ad02300170807d8001ad028801cc08a80101b001019a0200"
@@ -166,6 +171,10 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         else repo.observePacketsForSession(session.id)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val totalSessionPacketCount: StateFlow<Int> = sessionPackets
+        .map { it.size }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     val filteredPackets: StateFlow<List<CapturedPacketEntity>> = combine(
         sessionPackets,
         _searchQuery,
@@ -176,12 +185,20 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
                 pkt.url.contains(query, ignoreCase = true) ||
                 pkt.host.contains(query, ignoreCase = true) ||
                 pkt.method.contains(query, ignoreCase = true) ||
+                pkt.protocol.contains(query, ignoreCase = true) ||
                 pkt.requestBodyHex.contains(query, ignoreCase = true) ||
                 pkt.responseBodyHex.contains(query, ignoreCase = true)
 
             val matchesChip = when (chip) {
                 PacketFilterChip.ALL -> true
-                PacketFilterChip.HTTP_HTTPS -> pkt.protocol.equals("HTTP", true) || pkt.protocol.equals("HTTPS", true)
+                PacketFilterChip.HTTP_HTTPS ->
+                    (pkt.protocol.equals("HTTP", true) || pkt.protocol.equals("HTTPS", true)) &&
+                        !pkt.method.equals("TLS", true) &&
+                        !pkt.method.equals("SYN", true)
+                PacketFilterChip.TCP ->
+                    pkt.protocol.equals("TCP", true) ||
+                        pkt.method.equals("TLS", true) ||
+                        pkt.method.equals("SYN", true)
                 PacketFilterChip.PROTOBUF -> {
                     val reqProto = pkt.requestBodyHex.isNotEmpty() &&
                         PayloadAnalyzer.quickClassify(pkt.requestBodyHex) == PayloadClassification.PROTOBUF
@@ -208,12 +225,20 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
                 _selectedSessionId.value = seededId
             }
         }
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { certManager.ensureCa() }
-            _caReady.value = certManager.isCaReady()
-        }
+        refreshCaTrustStatus()
         recomputeDecoderLab(_decoderLab.value.inputText, _decoderLab.value.headerSkipBytes)
         refreshInstalledApps()
+    }
+
+    fun refreshCaTrustStatus() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { certManager.ensureCa() }
+            val ready = certManager.isCaReady()
+            val trusted = runCatching { certManager.isCaTrustedByAndroid() }.getOrDefault(false)
+            _caReady.value = ready
+            _caTrusted.value = trusted
+            NetTraceVpnService.updateCaTrusted(trusted)
+        }
     }
 
     fun refreshInstalledApps() {
@@ -235,6 +260,19 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             prefs.setTargetApp(appInfo.packageName, appInfo.appName, appInfo.uid)
             _snackbarMessage.value = "Target locked to ${appInfo.appName} (${appInfo.packageName})"
+        }
+    }
+
+    fun toggleVpnFullPacket(enabled: Boolean) {
+        NetTraceVpnService.updateFilter(!enabled)
+        _filterChip.value = if (enabled) PacketFilterChip.ALL else PacketFilterChip.HTTP_HTTPS
+        viewModelScope.launch {
+            prefs.setVpnFullPacketMode(enabled)
+            _snackbarMessage.value = if (enabled) {
+                "Full Packet Capture ON — capturing HTTP/HTTPS, TCP, UDP & in-game actions"
+            } else {
+                "Decodable Only ON — filtering for decodable HTTP/Protobuf/JSON"
+            }
         }
     }
 
@@ -279,14 +317,16 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun prepareCaInstallIntent(onReady: (Intent) -> Unit) {
+    fun prepareDirectCaInstall(onReady: (intents: List<Intent>, savedPath: String?) -> Unit) {
         NetTraceVpnService.clearPinningBypassCache()
         viewModelScope.launch {
-            val intent = withContext(Dispatchers.IO) {
-                certManager.createInstallCaIntent()
+            val (intents, savedPath) = withContext(Dispatchers.IO) {
+                val path = runCatching { certManager.saveCaCertToAryanFolder() }.getOrNull()
+                val candidates = certManager.prepareDirectCaInstallIntents()
+                candidates to path
             }
             _caReady.value = certManager.isCaReady()
-            onReady(intent)
+            onReady(intents, savedPath)
         }
     }
 
@@ -308,6 +348,11 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setCaptureMode(mode: CaptureEngineMode) {
+        val cur = settings.value
+        _filterChip.value = when (mode) {
+            CaptureEngineMode.APP_VPN -> if (cur.vpnFullPacketMode) PacketFilterChip.ALL else PacketFilterChip.HTTP_HTTPS
+            CaptureEngineMode.LOCAL_PROXY -> if (cur.onlyDecodableHttp) PacketFilterChip.HTTP_HTTPS else PacketFilterChip.ALL
+        }
         viewModelScope.launch {
             prefs.setCaptureMode(mode)
         }
@@ -329,6 +374,8 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun toggleOnlyDecodableHttp(enabled: Boolean) {
+        LocalForwardProxyService.updateFilter(enabled)
+        _filterChip.value = if (enabled) PacketFilterChip.HTTP_HTTPS else PacketFilterChip.ALL
         viewModelScope.launch {
             prefs.setOnlyDecodableHttp(enabled)
         }
@@ -366,17 +413,21 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun startVpnCapture() {
-        val target = settings.value.targetApp
+        val current = settings.value
+        val target = current.targetApp
         if (target.packageName.isBlank()) {
-            _snackbarMessage.value = "Please select a target app first."
+            _snackbarMessage.value = "Select a Target App before starting capture."
             return
         }
+        val onlyDecodable = !current.vpnFullPacketMode
+        NetTraceVpnService.updateFilter(onlyDecodable)
+        _filterChip.value = if (current.vpnFullPacketMode) PacketFilterChip.ALL else PacketFilterChip.HTTP_HTTPS
         NetTraceVpnService.startCapture(
             context = app,
             packageName = target.packageName,
             appName = target.appName,
-            mitmEnabled = settings.value.httpsMitmEnabled,
-            onlyDecodableHttp = settings.value.onlyDecodableHttp
+            mitmEnabled = current.httpsMitmEnabled,
+            onlyDecodableHttp = onlyDecodable
         )
     }
 
@@ -492,8 +543,9 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     fun addRule(name: String, pattern: String, matchType: String, action: String, targetOnly: Boolean) {
         if (pattern.isBlank()) return
         viewModelScope.launch {
-            val targetPkg = if (targetOnly && settings.value.targetApp.packageName.isNotBlank()) {
-                settings.value.targetApp.packageName
+            val current = settings.value
+            val targetPkg = if (targetOnly && current.targetApp.packageName.isNotBlank()) {
+                current.targetApp.packageName
             } else {
                 "*"
             }

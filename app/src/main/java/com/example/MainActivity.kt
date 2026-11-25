@@ -682,8 +682,6 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                     onDecodeClick = vm::runDecoderLabDecode,
                                     onPresetClick = vm::applyDecoderLabPreset,
                                     onHeaderSkipChange = vm::updateDecoderLabHeaderSkip,
-                                    onUpdateCrypto = vm::updateDecoderLabCrypto,
-                                    onRunDecrypt = vm::runDecoderLabDecrypt,
                                     onCopyToast = { msg ->
                                         coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
                                     }

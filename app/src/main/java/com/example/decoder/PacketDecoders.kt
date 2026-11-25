@@ -422,6 +422,8 @@ data class PayloadAnalysis(
 object PayloadAnalyzer {
     private const val MAX_INPUT_SCAN_CHARS = 524_288
     private const val MAX_DECODE_HEX_CHARS = 262_144
+    private const val STANDARD_GAME_AES_KEY = "Yg&tc%DEuh6%Zc^8"
+    private const val STANDARD_GAME_AES_IV = "6oyZDr22E3ychjM%"
 
     private val classificationCache = object : LinkedHashMap<String, PayloadClassification>(256, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PayloadClassification>?): Boolean {
@@ -454,7 +456,7 @@ object PayloadAnalyzer {
                 textCandidate != null && isValidJson(textCandidate.trim()) -> PayloadClassification.JSON
                 textCandidate != null && isCleanReadableText(textCandidate) -> PayloadClassification.TEXT
                 ProtobufWireDecoder.decode(bytes) != null -> PayloadClassification.PROTOBUF
-                bytes.size >= 16 && bytes.size % 16 == 0 -> PayloadClassification.ENCRYPTED_BLOCK
+                bytes.size >= 16 && bytes.size % 16 == 0 -> classifyEncryptedBlock(bytes)
                 else -> PayloadClassification.RAW_BINARY
             }
         }
@@ -465,6 +467,18 @@ object PayloadAnalyzer {
             }
         }
         return result
+    }
+
+    private fun classifyEncryptedBlock(bytes: ByteArray): PayloadClassification {
+        val plain = tryStandardGameDecrypt(bytes) ?: return PayloadClassification.ENCRYPTED_BLOCK
+        if (plain.isEmpty()) return PayloadClassification.PROTOBUF
+        val plainText = tryReadableUtf8(plain)
+        return when {
+            plainText != null && isValidJson(plainText.trim()) -> PayloadClassification.JSON
+            plainText != null && isCleanReadableText(plainText) -> PayloadClassification.TEXT
+            ProtobufWireDecoder.decode(plain) != null -> PayloadClassification.PROTOBUF
+            else -> PayloadClassification.ENCRYPTED_BLOCK
+        }
     }
 
     fun isStructuredDecodable(hexInput: String): Boolean {
@@ -548,13 +562,80 @@ object PayloadAnalyzer {
             )
         }
 
-        // 3. Check 16-byte AES block alignment
+        // 3. Check 16-byte AES block alignment & transparently decode game payloads
         if (bytes.size >= 16 && bytes.size % 16 == 0) {
+            val plain = tryStandardGameDecrypt(bytes)
+            if (plain != null) {
+                if (plain.isEmpty()) {
+                    val emptyProto = ProtobufDecodeResult(
+                        fields = emptyList(),
+                        jsonFormatted = "{}",
+                        fieldsDictFormatted = "fields = {}",
+                        byteCount = 0
+                    )
+                    return PayloadAnalysis(
+                        hex = cleanHex,
+                        byteCount = bytes.size,
+                        classification = PayloadClassification.PROTOBUF,
+                        summary = "Protobuf Wire Format • 0 fields (${bytes.size}B decoded)",
+                        protobuf = emptyProto,
+                        formattedJson = emptyProto.jsonFormatted,
+                        hexDump = hexDump,
+                        base64 = base64
+                    )
+                }
+                val plainText = tryReadableUtf8(plain)
+                if (plainText != null) {
+                    val trimmedPlain = plainText.trim()
+                    if ((trimmedPlain.startsWith("{") && trimmedPlain.endsWith("}")) ||
+                        (trimmedPlain.startsWith("[") && trimmedPlain.endsWith("]"))
+                    ) {
+                        val pretty = tryFormatJson(trimmedPlain)
+                        if (pretty != null) {
+                            return PayloadAnalysis(
+                                hex = cleanHex,
+                                byteCount = bytes.size,
+                                classification = PayloadClassification.JSON,
+                                summary = "UTF-8 JSON (${bytes.size}B decoded)",
+                                formattedJson = pretty,
+                                utf8Text = plainText,
+                                hexDump = hexDump,
+                                base64 = base64
+                            )
+                        }
+                    }
+                    if (isCleanReadableText(plainText)) {
+                        return PayloadAnalysis(
+                            hex = cleanHex,
+                            byteCount = bytes.size,
+                            classification = PayloadClassification.TEXT,
+                            summary = "Plaintext / Form Data (${bytes.size}B decoded)",
+                            utf8Text = plainText,
+                            hexDump = hexDump,
+                            base64 = base64
+                        )
+                    }
+                }
+                val decodedProto = ProtobufWireDecoder.decode(plain)
+                if (decodedProto != null) {
+                    return PayloadAnalysis(
+                        hex = cleanHex,
+                        byteCount = bytes.size,
+                        classification = PayloadClassification.PROTOBUF,
+                        summary = "Protobuf Wire Format • ${decodedProto.fields.size} top-level fields (${bytes.size}B decoded)",
+                        protobuf = decodedProto,
+                        formattedJson = decodedProto.jsonFormatted,
+                        hexDump = hexDump,
+                        base64 = base64
+                    )
+                }
+            }
+
             return PayloadAnalysis(
                 hex = cleanHex,
                 byteCount = bytes.size,
                 classification = PayloadClassification.ENCRYPTED_BLOCK,
-                summary = "16B-aligned binary block (${bytes.size} bytes) — likely AES-CBC/ECB encrypted",
+                summary = "Binary payload (${bytes.size} bytes)",
                 hexDump = hexDump,
                 base64 = base64
             )
@@ -568,6 +649,21 @@ object PayloadAnalyzer {
             hexDump = hexDump,
             base64 = base64
         )
+    }
+
+    private fun tryStandardGameDecrypt(bytes: ByteArray): ByteArray? {
+        if (bytes.size < 16 || bytes.size % 16 != 0) return null
+        return try {
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(STANDARD_GAME_AES_KEY.toByteArray(Charsets.UTF_8), "AES"),
+                IvParameterSpec(STANDARD_GAME_AES_IV.toByteArray(Charsets.UTF_8))
+            )
+            cipher.doFinal(bytes)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun tryReadableUtf8(bytes: ByteArray): String? {
@@ -603,68 +699,6 @@ object PayloadAnalyzer {
             else JSONArray(raw).toString(2)
         } catch (_: Exception) {
             null
-        }
-    }
-}
-
-enum class DecryptMode(val label: String) {
-    AES_CBC_PKCS5("AES-CBC (PKCS5)"),
-    AES_CBC_NOPAD("AES-CBC (Raw)"),
-    AES_ECB_PKCS5("AES-ECB (PKCS5)"),
-    XOR_KEY("Repeating XOR")
-}
-
-object PayloadDecryptor {
-    fun decrypt(
-        payloadHex: String,
-        keyInput: String,
-        ivInput: String,
-        keyIsHex: Boolean,
-        mode: DecryptMode
-    ): Result<PayloadAnalysis> {
-        return try {
-            val cipherBytes = HexUtils.hexToBytes(payloadHex)
-            require(cipherBytes.isNotEmpty()) { "Payload hex is empty." }
-
-            val keyBytes = if (keyIsHex) HexUtils.hexToBytes(keyInput) else keyInput.toByteArray(Charsets.UTF_8)
-            require(keyBytes.isNotEmpty()) { "Key cannot be empty." }
-
-            val plainBytes = when (mode) {
-                DecryptMode.XOR_KEY -> {
-                    ByteArray(cipherBytes.size) { idx ->
-                        (cipherBytes[idx].toInt() xor keyBytes[idx % keyBytes.size].toInt()).toByte()
-                    }
-                }
-                DecryptMode.AES_ECB_PKCS5 -> {
-                    require(keyBytes.size in listOf(16, 24, 32)) { "AES key must be 16, 24, or 32 bytes (got ${keyBytes.size})." }
-                    val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
-                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"))
-                    cipher.doFinal(cipherBytes)
-                }
-                DecryptMode.AES_CBC_PKCS5, DecryptMode.AES_CBC_NOPAD -> {
-                    require(keyBytes.size in listOf(16, 24, 32)) { "AES key must be 16, 24, or 32 bytes (got ${keyBytes.size})." }
-                    val ivBytes = if (ivInput.isBlank()) {
-                        ByteArray(16)
-                    } else if (keyIsHex) {
-                        HexUtils.hexToBytes(ivInput)
-                    } else {
-                        ivInput.toByteArray(Charsets.UTF_8)
-                    }
-                    require(ivBytes.size == 16) { "AES-CBC IV must be 16 bytes (got ${ivBytes.size})." }
-                    val transformation = if (mode == DecryptMode.AES_CBC_PKCS5) {
-                        "AES/CBC/PKCS5Padding"
-                    } else {
-                        "AES/CBC/NoPadding"
-                    }
-                    val cipher = Cipher.getInstance(transformation)
-                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(ivBytes))
-                    cipher.doFinal(cipherBytes)
-                }
-            }
-
-            Result.success(PayloadAnalyzer.analyze(HexUtils.bytesToHex(plainBytes)))
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
 }

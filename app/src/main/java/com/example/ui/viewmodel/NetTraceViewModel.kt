@@ -11,7 +11,6 @@ import com.example.data.db.CapturedPacketEntity
 import com.example.data.db.TrafficRuleEntity
 import com.example.data.prefs.AppSettings
 import com.example.decoder.BatchDecodeExporter
-import com.example.decoder.DecryptMode
 import com.example.decoder.FullDecodeResult
 import com.example.decoder.FullDecodeScope
 import com.example.decoder.HexUtils
@@ -21,7 +20,6 @@ import com.example.decoder.PacketJsonSerializer
 import com.example.decoder.PayloadAnalysis
 import com.example.decoder.PayloadAnalyzer
 import com.example.decoder.PayloadClassification
-import com.example.decoder.PayloadDecryptor
 import com.example.data.prefs.CaptureEngineMode
 import com.example.proxy.LocalForwardProxyEngine
 import com.example.proxy.LocalForwardProxyService
@@ -73,13 +71,7 @@ data class DecoderLabState(
     val headerHexPreview: String = "",
     val effectivePayloadHex: String = "",
     val jwtResult: JwtDecodeResult? = null,
-    val payloadAnalysis: PayloadAnalysis? = null,
-    val keyInput: String = "",
-    val ivInput: String = "",
-    val keyIsHex: Boolean = false,
-    val decryptMode: DecryptMode = DecryptMode.AES_CBC_PKCS5,
-    val decryptedAnalysis: PayloadAnalysis? = null,
-    val decryptError: String? = null
+    val payloadAnalysis: PayloadAnalysis? = null
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -145,7 +137,6 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
     private val _decoderLab = MutableStateFlow(DecoderLabState())
     val decoderLab: StateFlow<DecoderLabState> = _decoderLab.asStateFlow()
     private var decoderLabJob: Job? = null
-    private var decryptLabJob: Job? = null
 
     val activeSession: StateFlow<CaptureSessionEntity?> = combine(
         _selectedSessionId,
@@ -587,9 +578,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
                 headerHexPreview = "",
                 effectivePayloadHex = "",
                 jwtResult = null,
-                payloadAnalysis = null,
-                decryptedAnalysis = null,
-                decryptError = null
+                payloadAnalysis = null
             )
         }
     }
@@ -621,9 +610,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         _decoderLab.update {
             it.copy(
                 inputText = input,
-                headerSkipBytes = headerSkipBytes,
-                decryptedAnalysis = null,
-                decryptError = null
+                headerSkipBytes = headerSkipBytes
             )
         }
         decoderLabJob?.cancel()
@@ -644,43 +631,6 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
                         payloadAnalysis = analysis
                     )
                 } else cur
-            }
-        }
-    }
-
-    fun updateDecoderLabCrypto(
-        key: String = _decoderLab.value.keyInput,
-        iv: String = _decoderLab.value.ivInput,
-        keyIsHex: Boolean = _decoderLab.value.keyIsHex,
-        mode: DecryptMode = _decoderLab.value.decryptMode
-    ) {
-        _decoderLab.update {
-            it.copy(
-                keyInput = key,
-                ivInput = iv,
-                keyIsHex = keyIsHex,
-                decryptMode = mode
-            )
-        }
-    }
-
-    fun runDecoderLabDecrypt() {
-        val st = _decoderLab.value
-        val targetHex = st.effectivePayloadHex.ifBlank { st.inputText }
-        decryptLabJob?.cancel()
-        decryptLabJob = viewModelScope.launch(Dispatchers.Default) {
-            val result = PayloadDecryptor.decrypt(
-                payloadHex = targetHex,
-                keyInput = st.keyInput,
-                ivInput = st.ivInput,
-                keyIsHex = st.keyIsHex,
-                mode = st.decryptMode
-            )
-            _decoderLab.update { cur ->
-                result.fold(
-                    onSuccess = { cur.copy(decryptedAnalysis = it, decryptError = null) },
-                    onFailure = { cur.copy(decryptedAnalysis = null, decryptError = it.message ?: "Decryption failed") }
-                )
             }
         }
     }

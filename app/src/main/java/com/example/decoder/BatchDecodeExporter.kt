@@ -68,6 +68,7 @@ object BatchDecodeExporter {
     ): Boolean {
         val proto = analysis.protobuf
         if (proto != null) {
+            if (proto.fields.isEmpty()) return analysis.byteCount > 0
             return ProtobufFieldsFormatter.isCleanPackageProtobuf(proto.fields, endpointHint)
         }
         val json = analysis.formattedJson

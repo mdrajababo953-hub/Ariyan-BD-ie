@@ -33,14 +33,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -51,7 +49,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,12 +60,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.R
 import com.example.data.db.CapturedPacketEntity
 import com.example.decoder.BatchDecodeExporter
-import com.example.decoder.DecryptMode
 import com.example.decoder.HexUtils
 import com.example.decoder.JwtDecodeResult
 import com.example.decoder.JwtDecoder
@@ -76,7 +71,6 @@ import com.example.decoder.PacketJsonSerializer
 import com.example.decoder.PayloadAnalysis
 import com.example.decoder.PayloadAnalyzer
 import com.example.decoder.PayloadClassification
-import com.example.decoder.PayloadDecryptor
 import com.example.decoder.ProtobufFieldsFormatter
 import com.example.ui.components.AppIcons
 import com.example.ui.components.Formatters
@@ -370,8 +364,7 @@ private fun DecodeTabContent(
                 isResponse = false,
                 analysis = reqAnalysis,
                 rawHex = packet.requestBodyHex,
-                onCopyToast = onCopyToast,
-                onSendToDecoderLab = onSendToDecoderLab
+                onCopyToast = onCopyToast
             )
         }
 
@@ -702,20 +695,9 @@ fun PayloadDecodedSection(
     isResponse: Boolean = false,
     analysis: PayloadAnalysis,
     rawHex: String,
-    onCopyToast: (String) -> Unit,
-    onSendToDecoderLab: (String) -> Unit
+    onCopyToast: (String) -> Unit
 ) {
-    val decryptScope = rememberCoroutineScope()
     var protoViewMode by remember(rawHex) { mutableIntStateOf(0) }
-    var decryptedProtoViewMode by remember(rawHex) { mutableIntStateOf(0) }
-    var showDecryptor by remember(rawHex) { mutableStateOf(false) }
-    var keyInput by remember(rawHex) { mutableStateOf("") }
-    var ivInput by remember(rawHex) { mutableStateOf("") }
-    var keyIsHex by remember(rawHex) { mutableStateOf(false) }
-    var mode by remember { mutableStateOf(DecryptMode.AES_CBC_PKCS5) }
-    var isDecrypting by remember(rawHex) { mutableStateOf(false) }
-    var decryptResult by remember(rawHex) { mutableStateOf<PayloadAnalysis?>(null) }
-    var decryptError by remember(rawHex) { mutableStateOf<String?>(null) }
 
     val badgeColor = when (analysis.classification) {
         PayloadClassification.PROTOBUF -> VioletProto
@@ -871,238 +853,6 @@ fun PayloadDecodedSection(
                     }
                 }
 
-                if (analysis.classification == PayloadClassification.ENCRYPTED_BLOCK ||
-                    analysis.classification == PayloadClassification.RAW_BINARY
-                ) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Binary / encrypted payload (${analysis.byteCount}B). Enter AES / XOR key below or open in Decoder tab to decrypt.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = AmberSignal
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    OutlinedButton(
-                        onClick = { showDecryptor = !showDecryptor },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(AppIcons.LockOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (showDecryptor) "Hide Key Tool" else "AES / XOR Key")
-                    }
-                    OutlinedButton(
-                        onClick = { onSendToDecoderLab(rawHex) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(AppIcons.Code, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Open in Lab")
-                    }
-                }
-
-                AnimatedVisibility(visible = showDecryptor) {
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(top = 12.dp)
-                    ) {
-                        HorizontalDivider()
-                        Text(
-                            text = if (isResponse) "AES / XOR Payload Decryptor" else "Decode Request (AES / XOR)",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = AmberSignal
-                        )
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            DecryptMode.entries.take(2).forEach { m ->
-                                FilterChip(
-                                    selected = mode == m,
-                                    onClick = { mode = m },
-                                    label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
-                                )
-                            }
-                        }
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            DecryptMode.entries.drop(2).forEach { m ->
-                                FilterChip(
-                                    selected = mode == m,
-                                    onClick = { mode = m },
-                                    label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
-                                )
-                            }
-                        }
-                        OutlinedTextField(
-                            value = keyInput,
-                            onValueChange = { keyInput = it },
-                            label = { Text(if (keyIsHex) "Key (Hex)" else "Key (UTF-8 / 32-Hex)") },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (mode == DecryptMode.AES_CBC_PKCS5 || mode == DecryptMode.AES_CBC_NOPAD) {
-                            OutlinedTextField(
-                                value = ivInput,
-                                onValueChange = { ivInput = it },
-                                label = { Text("IV (16B, blank = zero IV)") },
-                                singleLine = true,
-                                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Key/IV is Hex", style = MaterialTheme.typography.bodySmall)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Switch(checked = keyIsHex, onCheckedChange = { keyIsHex = it })
-                        }
-                        Button(
-                            enabled = !isDecrypting && keyInput.isNotBlank(),
-                            onClick = {
-                                isDecrypting = true
-                                decryptScope.launch {
-                                    val res = withContext(Dispatchers.Default) {
-                                        PayloadDecryptor.decrypt(
-                                            payloadHex = rawHex,
-                                            keyInput = keyInput,
-                                            ivInput = ivInput,
-                                            keyIsHex = keyIsHex,
-                                            mode = mode
-                                        )
-                                    }
-                                    res.fold(
-                                        onSuccess = {
-                                            decryptResult = it
-                                            decryptError = null
-                                        },
-                                        onFailure = {
-                                            decryptResult = null
-                                            decryptError = it.message
-                                        }
-                                    )
-                                    isDecrypting = false
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("decode_request_decrypt_button")
-                        ) {
-                            Text(if (isDecrypting) "Decoding..." else if (isResponse) "Decode Payload" else "Decode Request")
-                        }
-
-                        decryptError?.let { err ->
-                            Text(err, style = MaterialTheme.typography.bodySmall, color = CoralAlert)
-                        }
-
-                        decryptResult?.let { dec ->
-                            Surface(
-                                color = EmeraldPulse.copy(alpha = 0.08f),
-                                shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, EmeraldPulse.copy(alpha = 0.4f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(modifier = Modifier.padding(10.dp)) {
-                                    Text(
-                                        text = "Decrypted Output: ${dec.summary}",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = EmeraldPulse
-                                    )
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    dec.protobuf?.let { p ->
-                                        val decPackagePy by produceState(
-                                            initialValue = "",
-                                            key1 = p,
-                                            key2 = endpointPath,
-                                            key3 = isResponse
-                                        ) {
-                                            value = withContext(Dispatchers.Default) {
-                                                ProtobufFieldsFormatter.formatSmartPythonPackage(
-                                                    nodes = p.fields,
-                                                    endpointOrPath = endpointPath,
-                                                    isResponse = isResponse
-                                                )
-                                            }
-                                        }
-                                        val decAsyncSnippet by produceState(
-                                            initialValue = "",
-                                            key1 = p,
-                                            key2 = endpointPath
-                                        ) {
-                                            value = withContext(Dispatchers.Default) {
-                                                ProtobufFieldsFormatter.formatAsyncSnippet(p.fields, endpointPath)
-                                            }
-                                        }
-                                        LazyRow(
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            val labels = listOf("Package PY", "JSON", "Fields {}", "async def", "Tree")
-                                            items(labels.size) { idx ->
-                                                FilterChip(
-                                                    selected = decryptedProtoViewMode == idx,
-                                                    onClick = { decryptedProtoViewMode = idx },
-                                                    label = { Text(labels[idx], style = MaterialTheme.typography.labelSmall) }
-                                                )
-                                            }
-                                        }
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        when (decryptedProtoViewMode) {
-                                            0 -> PythonFieldsCodeBlock(
-                                                code = decPackagePy,
-                                                title = "Decrypted Package (PY)",
-                                                onCopy = { onCopyToast("Decrypted Python package copied") }
-                                            )
-                                            1 -> SyntaxHighlightedJsonBlock(
-                                                json = p.jsonFormatted,
-                                                title = "Decrypted Protobuf JSON",
-                                                onCopy = { onCopyToast("Decrypted JSON copied") }
-                                            )
-                                            2 -> PythonFieldsCodeBlock(
-                                                code = p.fieldsDictFormatted,
-                                                title = "Decrypted Fields {}",
-                                                onCopy = { onCopyToast("Decrypted fields copied") }
-                                            )
-                                            3 -> PythonFieldsCodeBlock(
-                                                code = decAsyncSnippet,
-                                                title = "Async Packet Builder Snippet",
-                                                onCopy = { onCopyToast("Async snippet copied") }
-                                            )
-                                            else -> ProtobufTreeView(fields = p.fields)
-                                        }
-                                    }
-                                    if (dec.protobuf == null) {
-                                        if (dec.formattedJson != null) {
-                                            SyntaxHighlightedJsonBlock(
-                                                json = dec.formattedJson,
-                                                title = "Decrypted JSON",
-                                                onCopy = { onCopyToast("Decrypted JSON copied") }
-                                            )
-                                        } else {
-                                            val fallback = dec.utf8Text ?: dec.hex.ifBlank { "<Empty Body>" }
-                                            SelectionContainer {
-                                                Text(
-                                                    text = fallback,
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    color = MaterialTheme.colorScheme.onSurface
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }

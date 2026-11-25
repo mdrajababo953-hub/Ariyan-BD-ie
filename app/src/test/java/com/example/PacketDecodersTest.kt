@@ -71,7 +71,7 @@ class PacketDecodersTest {
 
     @Test
     fun `payload analyzer detects 16-byte encrypted block`() {
-        val hex = "9b886fb750efb187097dbbb281be7bae"
+        val hex = "00112233445566778899aabbccddeeff"
         val analysis = PayloadAnalyzer.analyze(hex)
         assertEquals(PayloadClassification.ENCRYPTED_BLOCK, analysis.classification)
         assertEquals(16, analysis.byteCount)
@@ -155,7 +155,7 @@ class PacketDecodersTest {
         )
         assertEquals(
             PayloadClassification.ENCRYPTED_BLOCK,
-            PayloadAnalyzer.quickClassify("9b886fb750efb187097dbbb281be7bae")
+            PayloadAnalyzer.quickClassify("00112233445566778899aabbccddeeff")
         )
         val jsonHex = HexUtils.bytesToHex("{\"ok\":true}".toByteArray())
         assertEquals(PayloadClassification.JSON, PayloadAnalyzer.quickClassify(jsonHex))
@@ -277,7 +277,7 @@ class PacketDecodersTest {
             protocol = "HTTPS",
             statusCode = 200,
             requestHeadersJson = "{\"Authorization\":\"Bearer abc\"}",
-            requestBodyHex = "1a725b2c56ec52ba7d09623454c0a003",
+            requestBodyHex = "00112233445566778899aabbccddeeff",
             responseHeadersJson = "{\"Server\":\"nginx\"}",
             responseBodyHex = "0a00",
             durationMs = 12,
@@ -327,7 +327,7 @@ class PacketDecodersTest {
 
     @Test
     fun `hasDecodablePayload accepts when either request or response decodes to protobuf or json`() {
-        val enc16 = "9b886fb750efb187097dbbb281be7bae"
+        val enc16 = "00112233445566778899aabbccddeeff"
         val proto = "08f4f3c8cf3d1026"
         val jsonHex = HexUtils.bytesToHex("{\"uid\":123}".toByteArray())
 
@@ -471,7 +471,7 @@ class PacketDecodersTest {
             id = 3,
             url = "https://client.ind.freefiremobile.com/GetCatalog",
             path = "/GetCatalog",
-            requestBodyHex = "9b886fb750efb187097dbbb281be7bae",
+            requestBodyHex = "00112233445566778899aabbccddeeff",
             responseBodyHex = bulkCatalogHex
         )
         val (filteredReport, filteredArr) = com.example.decoder.BatchDecodeExporter.buildPremiumPackageReport(
@@ -532,6 +532,69 @@ class PacketDecodersTest {
         val encPkt = pkt.copy(requestBodyHex = "ffa1f00b0204c6301c025261692cd59b")
         val encPkg = com.example.decoder.BatchDecodeExporter.formatRequestPackageOnly(encPkt)
         assertTrue(encPkg.contains("def purchase_gacha(K, V):"))
-        assertTrue(encPkg.contains("raw_hex = \"ffa1f00b0204c6301c025261692cd59b\""))
+        assertTrue(encPkg.contains("fields[1] = 93"))
+        assertTrue(encPkg.contains("fields[2] = 2"))
+        assertTrue(encPkg.contains("fields[3] = 471"))
+        assertTrue(encPkg.contains("return iZ(str(gZ(fields).hex()), packet_id, K, V)"))
+    }
+
+    @Test
+    fun `standard game encrypted requests decode transparently into protobuf and python packages`() {
+        // 1. Empty protobuf request (/GetRankingMatchGrandmasterPositions)
+        val emptyReqHex = "1A 72 5B 2C 56 EC 52 BA 7D 09 62 34 54 C0 A0 03"
+        assertEquals(PayloadClassification.PROTOBUF, PayloadAnalyzer.quickClassify(emptyReqHex))
+        val emptyAnalysis = PayloadAnalyzer.analyze(emptyReqHex)
+        assertEquals(PayloadClassification.PROTOBUF, emptyAnalysis.classification)
+        assertNotNull(emptyAnalysis.protobuf)
+        assertEquals("{}", emptyAnalysis.protobuf!!.jsonFormatted)
+        val emptyPkg = com.example.decoder.ProtobufFieldsFormatter.formatSmartPythonPackage(
+            nodes = emptyAnalysis.protobuf!!.fields,
+            endpointOrPath = "/GetRankingMatchGrandmasterPositions",
+            isResponse = false
+        )
+        assertTrue(emptyPkg.contains("def get_ranking_match_grandmaster_positions(K, V):"))
+        assertTrue(emptyPkg.contains("fields = {}"))
+        assertTrue(emptyPkg.contains("return iZ(str(gZ(fields).hex()), packet_id, K, V)"))
+
+        // 2. Populated 16B encrypted request (/GetHeroicInfo)
+        val infoHex = "9b886fb750efb187097dbbb281be7bae"
+        assertEquals(PayloadClassification.PROTOBUF, PayloadAnalyzer.quickClassify(infoHex))
+        val infoAnalysis = PayloadAnalyzer.analyze(infoHex)
+        assertEquals(PayloadClassification.PROTOBUF, infoAnalysis.classification)
+        val infoJson = org.json.JSONObject(infoAnalysis.protobuf!!.jsonFormatted)
+        assertEquals(16541432308L, infoJson.getLong("1"))
+        assertEquals(1L, infoJson.getLong("2"))
+
+        // 3. BatchDecodeExporter includes decoded empty-protobuf request without response decode
+        val pkt = com.example.data.db.CapturedPacketEntity(
+            id = 99,
+            sessionId = 1,
+            timestamp = 3000L,
+            method = "POST",
+            url = "https://client.ind.freefiremobile.com/GetRankingMatchGrandmasterPositions",
+            host = "client.ind.freefiremobile.com",
+            path = "/GetRankingMatchGrandmasterPositions",
+            port = 443,
+            protocol = "HTTPS",
+            statusCode = 200,
+            requestHeadersJson = "{}",
+            requestBodyHex = "1a725b2c56ec52ba7d09623454c0a003",
+            responseHeadersJson = "{}",
+            responseBodyHex = "0a1208f6c285ab0811f0ade1546ce9254318e807",
+            durationMs = 8,
+            bytesTx = 16,
+            bytesRx = 20,
+            isBlocked = false,
+            blockReason = null
+        )
+        val (report, arr) = com.example.decoder.BatchDecodeExporter.buildPremiumPackageReport(
+            session = null,
+            packets = listOf(pkt),
+            scope = com.example.decoder.FullDecodeScope.HTTP_HTTPS
+        )
+        assertEquals(1, arr.length())
+        assertTrue(report.contains("def get_ranking_match_grandmaster_positions(K, V):"))
+        assertTrue(report.contains("fields = {}"))
+        assertTrue(!report.contains("get_ranking_match_grandmaster_positions_response"))
     }
 }

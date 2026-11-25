@@ -20,7 +20,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -32,15 +31,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import com.example.decoder.DecryptMode
 import com.example.decoder.ProtobufFieldsFormatter
 import com.example.ui.components.ProtobufTreeView
 import com.example.ui.components.PythonFieldsCodeBlock
 import com.example.ui.components.SyntaxHighlightedJsonBlock
 import com.example.ui.components.TagChip
 import com.example.ui.theme.AmberSignal
-import com.example.ui.theme.CoralAlert
-import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.VioletProto
 import com.example.ui.viewmodel.DecoderLabState
@@ -61,13 +57,10 @@ fun DecoderLabScreen(
     onDecodeClick: () -> Unit,
     onPresetClick: (String) -> Unit,
     onHeaderSkipChange: (Int) -> Unit,
-    onUpdateCrypto: (key: String, iv: String, keyIsHex: Boolean, mode: DecryptMode) -> Unit,
-    onRunDecrypt: () -> Unit,
     onCopyToast: (String) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
     var protoViewMode by remember { mutableIntStateOf(0) }
-    var decryptedViewMode by remember { mutableIntStateOf(0) }
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
@@ -291,144 +284,6 @@ fun DecoderLabScreen(
                                     text = analysis.utf8Text ?: analysis.hex.ifBlank { "<Empty Body>" },
                                     style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
                                     color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // AES / XOR Key Workbench
-        item {
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, AmberSignal.copy(alpha = 0.45f)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(14.dp)
-                ) {
-                    Text("Cipher Decrypt Workbench", style = MaterialTheme.typography.titleSmall, color = AmberSignal)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(DecryptMode.entries.size) { idx ->
-                            val m = DecryptMode.entries[idx]
-                            FilterChip(
-                                selected = state.decryptMode == m,
-                                onClick = {
-                                    onUpdateCrypto(state.keyInput, state.ivInput, state.keyIsHex, m)
-                                },
-                                label = { Text(m.label) }
-                            )
-                        }
-                    }
-                    OutlinedTextField(
-                        value = state.keyInput,
-                        onValueChange = { onUpdateCrypto(it, state.ivInput, state.keyIsHex, state.decryptMode) },
-                        label = { Text(if (state.keyIsHex) "Key (Hex)" else "Key (UTF-8)") },
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (state.decryptMode == DecryptMode.AES_CBC_PKCS5 || state.decryptMode == DecryptMode.AES_CBC_NOPAD) {
-                        OutlinedTextField(
-                            value = state.ivInput,
-                            onValueChange = { onUpdateCrypto(state.keyInput, it, state.keyIsHex, state.decryptMode) },
-                            label = { Text("IV (16 bytes, blank = zeros)") },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Hex Key/IV", style = MaterialTheme.typography.bodySmall)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Switch(
-                            checked = state.keyIsHex,
-                            onCheckedChange = {
-                                onUpdateCrypto(state.keyInput, state.ivInput, it, state.decryptMode)
-                            }
-                        )
-                        Spacer(modifier = Modifier.weight(1f))
-                        Button(onClick = onRunDecrypt) {
-                            Text("Decrypt & Decode")
-                        }
-                    }
-
-                    state.decryptError?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = CoralAlert)
-                    }
-
-                    state.decryptedAnalysis?.let { dec ->
-                        Surface(
-                            color = EmeraldPulse.copy(alpha = 0.08f),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, EmeraldPulse.copy(alpha = 0.45f)),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Text(dec.summary, style = MaterialTheme.typography.labelMedium, color = EmeraldPulse)
-                                Spacer(modifier = Modifier.height(6.dp))
-                                dec.protobuf?.let { p ->
-                                    val hdrHex = state.headerHexPreview.ifBlank { "0E15" }
-                                    val packagePy = remember(p, hdrHex) {
-                                        ProtobufFieldsFormatter.formatSmartPythonPackage(
-                                            nodes = p.fields,
-                                            endpointOrPath = "Packet",
-                                            isResponse = false,
-                                            packetHeaderHex = hdrHex
-                                        )
-                                    }
-                                    val asyncSnippet = remember(p, hdrHex) {
-                                        ProtobufFieldsFormatter.formatAsyncSnippet(
-                                            nodes = p.fields,
-                                            endpointOrPath = "Packet",
-                                            packetHeaderHex = hdrHex
-                                        )
-                                    }
-                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        listOf("Package PY", "Fields {}", "async def", "Tree", "JSON").forEachIndexed { idx, label ->
-                                            item {
-                                                FilterChip(
-                                                    selected = decryptedViewMode == idx,
-                                                    onClick = { decryptedViewMode = idx },
-                                                    label = { Text(label) }
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    when (decryptedViewMode) {
-                                        0 -> PythonFieldsCodeBlock(
-                                            code = packagePy,
-                                            title = "Decrypted Pro Package (PY)",
-                                            onCopy = { onCopyToast("Python package copied") }
-                                        )
-                                        1 -> PythonFieldsCodeBlock(
-                                            code = p.fieldsDictFormatted,
-                                            title = "Decrypted Fields {}",
-                                            onCopy = { onCopyToast("Decrypted fields copied") }
-                                        )
-                                        2 -> PythonFieldsCodeBlock(
-                                            code = asyncSnippet,
-                                            title = "Async Packet Builder Snippet",
-                                            onCopy = { onCopyToast("Async snippet copied") }
-                                        )
-                                        3 -> ProtobufTreeView(fields = p.fields)
-                                        else -> SyntaxHighlightedJsonBlock(
-                                            json = p.jsonFormatted,
-                                            title = "Decrypted Protobuf JSON",
-                                            onCopy = { onCopyToast("JSON copied") }
-                                        )
-                                    }
-                                } ?: Text(
-                                    text = dec.formattedJson ?: dec.utf8Text ?: dec.hex.ifBlank { "<Empty Body>" },
-                                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily)
                                 )
                             }
                         }

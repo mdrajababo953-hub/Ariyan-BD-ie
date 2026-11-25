@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "NetTrace"
+rootProject.name = "ARIYAN A9X BD CAPTURE"
 
 include(":app")

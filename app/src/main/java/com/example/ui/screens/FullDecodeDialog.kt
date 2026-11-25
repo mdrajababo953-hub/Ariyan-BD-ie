@@ -8,10 +8,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Share
@@ -37,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.decoder.FullDecodeScope
 import com.example.ui.components.AppIcons
 import com.example.ui.theme.CoralAlert
@@ -48,7 +52,7 @@ import com.example.ui.viewmodel.FullDecodeUiState
 fun FullDecodeDialog(
     state: FullDecodeUiState,
     onSelectAndRun: (FullDecodeScope) -> Unit,
-    onShareJson: (String) -> Unit,
+    onSharePackage: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var chosenScope by remember(state.isDialogOpen) { mutableStateOf(state.selectedScope) }
@@ -67,9 +71,9 @@ fun FullDecodeDialog(
         title = {
             Text(
                 text = when {
-                    state.isRunning -> "Decoding Payloads..."
-                    state.result != null -> "Full Decode Saved"
-                    else -> "Full Decode to Aryan Folder"
+                    state.isRunning -> "Building Pro Packages..."
+                    state.result != null -> "Pro Package Saved"
+                    else -> "Pro Decode to Aryan Folder"
                 },
                 style = MaterialTheme.typography.titleLarge
             )
@@ -90,7 +94,7 @@ fun FullDecodeDialog(
                             CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.5.dp)
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Decoding ${state.selectedScope.label} hex & JWTs...",
+                                    text = "Converting ${state.selectedScope.label} to Python Packages...",
                                     style = MaterialTheme.typography.bodyMedium
                                 )
                                 Text(
@@ -119,12 +123,12 @@ fun FullDecodeDialog(
                                 modifier = Modifier.padding(12.dp)
                             ) {
                                 Text(
-                                    text = "${res.decodedCount} requests decoded into JSON",
+                                    text = "${res.decodedCount} packages formatted & saved",
                                     style = MaterialTheme.typography.titleSmall,
                                     color = EmeraldPulse
                                 )
                                 Text(
-                                    text = "Saved inside folder: Aryan",
+                                    text = "Saved inside Documents/Aryan",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
@@ -135,11 +139,36 @@ fun FullDecodeDialog(
                                 )
                             }
                         }
+
+                        val preview = remember(res.packageContent) {
+                            res.packageContent.take(1400)
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 170.dp)
+                        ) {
+                            Text(
+                                text = preview,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = JetBrainsMonoFamily,
+                                    fontSize = 10.sp,
+                                    lineHeight = 14.sp
+                                ),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(10.dp)
+                            )
+                        }
                     }
 
                     else -> {
                         Text(
-                            text = "Select which protocol scope to batch decode. Only decodable payloads are exported — each entry lists the API URL followed by clean decoded Request and Response JSON (no raw hex) inside Documents/Aryan.",
+                            text = "Batch-decode captured payloads into Pro Python Packages inside Documents/Aryan. Each entry cleanly separates Full URL, Request Hex, Response Hex, and auto-built Python code (build_login_payload / endpoint(K, V) -> iZ).",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -213,7 +242,7 @@ fun FullDecodeDialog(
                 state.result != null -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
-                            onClick = { onShareJson(state.result.jsonContent) },
+                            onClick = { onSharePackage(state.result.packageContent) },
                             modifier = Modifier.testTag("full_decode_share_button")
                         ) {
                             Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))

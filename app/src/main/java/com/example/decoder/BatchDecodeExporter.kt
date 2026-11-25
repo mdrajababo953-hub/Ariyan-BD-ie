@@ -27,6 +27,7 @@ data class FullDecodeResult(
     val fileName: String,
     val displayPath: String,
     val decodedCount: Int,
+    val packageContent: String,
     val jsonContent: String,
     val savedUri: Uri?
 )
@@ -61,6 +62,99 @@ object BatchDecodeExporter {
         }
     }
 
+    fun buildPremiumPackageReport(
+        session: CaptureSessionEntity?,
+        packets: List<CapturedPacketEntity>,
+        scope: FullDecodeScope,
+        onProgress: (processed: Int, total: Int) -> Unit = { _, _ -> }
+    ): Pair<String, JSONArray> {
+        val total = packets.size
+        val requestsArray = JSONArray()
+        val entryBlocks = mutableListOf<String>()
+
+        packets.forEachIndexed { index, pkt ->
+            onProgress(index + 1, total)
+            val item = PacketJsonSerializer.packetToJsonObject(pkt)
+            if (!item.isNull("request") || !item.isNull("response")) {
+                requestsArray.put(item)
+                entryBlocks += formatSinglePackageEntry(pkt)
+            }
+        }
+
+        val generatedAt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+        val targetLabel = session?.targetAppName?.takeIf { it.isNotBlank() } ?: "Captured Session"
+        val report = buildString {
+            appendLine("# ARIYAN A9X BD CAPTURE — PRO PACKAGE DECODE REPORT")
+            appendLine("# Scope: ${scope.label} | Target: $targetLabel | Packages: ${entryBlocks.size} | Generated: $generatedAt")
+            appendLine()
+            appendLine()
+            append(entryBlocks.joinToString("\n\n\n\n\n\n"))
+        }
+        return report to requestsArray
+    }
+
+    fun formatSinglePackageEntry(pkt: CapturedPacketEntity): String {
+        val fullUrl = pkt.url.ifBlank {
+            val pathPart = pkt.path.ifBlank { "/" }
+            "${pkt.protocol.lowercase(Locale.US)}://${pkt.host}$pathPart"
+        }
+        val reqHexClean = HexUtils.sanitizeHex(pkt.requestBodyHex).ifBlank { "<Empty>" }
+        val respHexClean = HexUtils.sanitizeHex(pkt.responseBodyHex).ifBlank { "<Empty>" }
+
+        val reqAnalysis = PayloadAnalyzer.analyze(pkt.requestBodyHex)
+        val respAnalysis = PayloadAnalyzer.analyze(pkt.responseBodyHex)
+
+        val endpointHint = pkt.path.ifBlank { fullUrl.substringAfter("://").substringAfter("/", "Packet") }
+
+        val reqDecodedBlock = formatDecodedBlock(
+            analysis = reqAnalysis,
+            endpointHint = endpointHint,
+            isResponse = false
+        )
+        val respDecodedBlock = formatDecodedBlock(
+            analysis = respAnalysis,
+            endpointHint = endpointHint,
+            isResponse = true
+        )
+
+        return buildString {
+            appendLine(fullUrl)
+            appendLine()
+            appendLine("Request Hex:")
+            appendLine(reqHexClean)
+            appendLine()
+            appendLine("Response Hex:")
+            appendLine(respHexClean)
+            appendLine()
+            appendLine("# === Request Decoded Package ===")
+            appendLine(reqDecodedBlock)
+            appendLine()
+            appendLine("# === Response Decoded Package ===")
+            append(respDecodedBlock)
+        }
+    }
+
+    private fun formatDecodedBlock(
+        analysis: PayloadAnalysis,
+        endpointHint: String,
+        isResponse: Boolean
+    ): String {
+        val proto = analysis.protobuf
+        return when {
+            proto != null -> {
+                ProtobufFieldsFormatter.formatSmartPythonPackage(
+                    nodes = proto.fields,
+                    endpointOrPath = endpointHint,
+                    isResponse = isResponse
+                )
+            }
+            analysis.formattedJson != null -> analysis.formattedJson
+            analysis.utf8Text != null && analysis.classification == PayloadClassification.TEXT -> analysis.utf8Text
+            analysis.classification == PayloadClassification.EMPTY -> "# <Empty>"
+            else -> "# <${analysis.classification.name} (${analysis.byteCount}B)>"
+        }
+    }
+
     suspend fun decodeAndSaveToAryanFolder(
         context: Context,
         session: CaptureSessionEntity?,
@@ -74,16 +168,12 @@ object BatchDecodeExporter {
                 "No decodable ${scope.label} payloads found in this session."
             }
 
-            val total = matching.size
-            val requestsArray = JSONArray()
-
-            matching.forEachIndexed { index, pkt ->
-                onProgress(index + 1, total)
-                val item = PacketJsonSerializer.packetToJsonObject(pkt)
-                if (!item.isNull("request") || !item.isNull("response")) {
-                    requestsArray.put(item)
-                }
-            }
+            val (packageReport, requestsArray) = buildPremiumPackageReport(
+                session = session,
+                packets = matching,
+                scope = scope,
+                onProgress = onProgress
+            )
 
             require(requestsArray.length() > 0) {
                 "No decodable ${scope.label} payloads found in this session."
@@ -91,14 +181,14 @@ object BatchDecodeExporter {
 
             val tsFmt = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             val rootJson = requestsArray.toString(2)
-
-            val fileName = "NetTrace_${scope.shortCode}_${tsFmt}.json"
-            val (displayPath, savedUri) = writeToAryanDirectory(context, fileName, rootJson)
+            val fileName = "ARIYAN_A9X_${scope.shortCode}_${tsFmt}.txt"
+            val (displayPath, savedUri) = writeToAryanDirectory(context, fileName, packageReport)
 
             FullDecodeResult(
                 fileName = fileName,
                 displayPath = displayPath,
                 decodedCount = requestsArray.length(),
+                packageContent = packageReport,
                 jsonContent = rootJson,
                 savedUri = savedUri
             )
@@ -116,7 +206,7 @@ object BatchDecodeExporter {
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-                put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
                 put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOCUMENTS}/Aryan")
             }
             val uri = resolver.insert(MediaStore.Files.getContentUri("external"), values)

@@ -688,10 +688,13 @@ private fun highlightPythonCode(
     numColor: Color,
     defaultColor: Color
 ): AnnotatedString {
+    val commentColor = defaultColor.copy(alpha = 0.52f)
     val regex = Regex(
-        "(\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*')|" +
-            "(\\b(?:async|def|return|await|fields)\\b)|" +
-            "(\\b\\d+\\s*:)|" +
+        "(#[^\\n]*)|" +
+            "(\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*')|" +
+            "(\\b(?:async|def|return|await|if|is|None|fields|P|response_fields|packet_id|raw)\\b)|" +
+            "(\\b(?:pb|enc|gZ|iZ|get_server_time|CrEaTe_ProTo|GeneRaTePk|bytes|fromhex|str|hex)\\b)|" +
+            "(\\[\\d+\\]|\\b\\d+\\s*:)|" +
             "(\\b\\d+\\b)"
     )
     return buildAnnotatedString {
@@ -702,13 +705,17 @@ private fun highlightPythonCode(
                     append(code.substring(last, m.range.first))
                 }
             }
-            val str = m.groups[1]?.value
-            val kw = m.groups[2]?.value
-            val fieldKey = m.groups[3]?.value
-            val num = m.groups[4]?.value
+            val comment = m.groups[1]?.value
+            val str = m.groups[2]?.value
+            val kw = m.groups[3]?.value
+            val fnCall = m.groups[4]?.value
+            val fieldKey = m.groups[5]?.value
+            val num = m.groups[6]?.value
             when {
+                comment != null -> withStyle(SpanStyle(color = commentColor)) { append(comment) }
                 str != null -> withStyle(SpanStyle(color = strColor)) { append(str) }
                 kw != null -> withStyle(SpanStyle(color = kwColor, fontWeight = FontWeight.Bold)) { append(kw) }
+                fnCall != null -> withStyle(SpanStyle(color = keyColor, fontWeight = FontWeight.SemiBold)) { append(fnCall) }
                 fieldKey != null -> withStyle(SpanStyle(color = keyColor, fontWeight = FontWeight.Bold)) { append(fieldKey) }
                 num != null -> withStyle(SpanStyle(color = numColor)) { append(num) }
             }

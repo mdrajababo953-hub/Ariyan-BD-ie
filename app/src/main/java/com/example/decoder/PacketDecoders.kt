@@ -767,6 +767,214 @@ object ProtobufFieldsFormatter {
         }
     }
 
+    fun formatSmartPythonPackage(
+        nodes: List<ProtobufFieldNode>,
+        endpointOrPath: String,
+        isResponse: Boolean = false,
+        packetHeaderHex: String = "0E15"
+    ): String {
+        if (isResponse) {
+            return formatBracketDict(nodes, varName = "response_fields")
+        }
+        return if (isLoginPayload(nodes, endpointOrPath)) {
+            formatLoginPayloadPython(nodes)
+        } else {
+            formatEndpointPackagePython(nodes, endpointOrPath, packetHeaderHex)
+        }
+    }
+
+    fun isLoginPayload(nodes: List<ProtobufFieldNode>, endpointOrPath: String): Boolean {
+        val tail = endpointOrPath.substringAfterLast("/").substringBefore("?").lowercase(java.util.Locale.US)
+        if (tail.contains("getlogindata") || tail == "login" || tail.startsWith("logindata")) {
+            return true
+        }
+        val byField = nodes.associateBy { it.fieldNumber }
+        val f4Str = byField[4]?.takeIf { it.wireTypeName.startsWith("STRING") }?.jsonValue?.toString()?.lowercase(java.util.Locale.US)
+        if (f4Str != null && (f4Str.contains("free fire") || f4Str.contains("freefire"))) {
+            return true
+        }
+        return byField.containsKey(22) && byField.containsKey(26) && byField.containsKey(29)
+    }
+
+    fun detectLoginRegion(nodes: List<ProtobufFieldNode>): String {
+        val raw = nodes.firstOrNull { it.fieldNumber == 26 && it.wireTypeName.startsWith("STRING") }
+            ?.jsonValue?.toString()?.trim()?.uppercase(java.util.Locale.US)
+        return if (!raw.isNullOrBlank() && raw.length in 2..6) raw else "BD"
+    }
+
+    fun formatLoginPayloadPython(nodes: List<ProtobufFieldNode>): String {
+        val region = detectLoginRegion(nodes)
+        return buildString {
+            appendLine("def build_login_payload(access_token, open_id, region=\"$region\", server_time_str=None):")
+            appendLine("    if server_time_str is None:")
+            appendLine("        server_time_str = get_server_time()")
+            appendLine()
+            appendLine("    P = {}")
+            appendLine()
+            val grouped = nodes.groupBy { it.fieldNumber }.toSortedMap()
+            grouped.forEach { (fieldNum, items) ->
+                val padNum = if (fieldNum < 10) " " else ""
+                if (items.size == 1) {
+                    val item = items.first()
+                    val isStr = item.wireTypeName.startsWith("STRING")
+                    val rawStr = item.jsonValue.toString()
+                    when {
+                        fieldNum == 3 && isStr -> {
+                            appendLine("    P[3] $padNum= server_time_str  # \"${escapePythonStr(rawStr)}\"")
+                        }
+                        fieldNum == 22 && isStr -> {
+                            val preview = if (rawStr.length > 24) "${rawStr.take(24)}..." else rawStr
+                            appendLine("    P[22] = access_token  # \"${escapePythonStr(preview)}\"")
+                        }
+                        fieldNum == 26 && isStr -> {
+                            appendLine("    P[26] = region  # \"${escapePythonStr(rawStr)}\"")
+                        }
+                        fieldNum == 29 && isStr -> {
+                            val preview = if (rawStr.length > 24) "${rawStr.take(24)}..." else rawStr
+                            appendLine("    P[29] = open_id  # \"${escapePythonStr(preview)}\"")
+                        }
+                        else -> {
+                            appendBracketEntry(
+                                out = this,
+                                prefix = "P[$fieldNum]",
+                                node = item,
+                                indent = "    ",
+                                eqPadding = padNum
+                            )
+                        }
+                    }
+                } else {
+                    val listItems = items.joinToString(", ") { formatSingleValue(it, 2) }
+                    appendLine("    P[$fieldNum]$padNum = [$listItems]")
+                }
+            }
+            appendLine()
+            appendLine("    raw = pb(P)")
+            append("    return enc(xK, xV, raw)")
+        }
+    }
+
+    fun formatEndpointPackagePython(
+        nodes: List<ProtobufFieldNode>,
+        endpointOrPath: String,
+        packetHeaderHex: String = "0E15"
+    ): String {
+        val fnName = toSnakeCaseEndpoint(endpointOrPath)
+        val body = formatBracketDict(nodes, varName = "fields", indent = "    ")
+        return buildString {
+            appendLine("def $fnName(K, V):")
+            appendLine("    packet_id = '$packetHeaderHex'")
+            appendLine(body)
+            append("    return iZ(str(gZ(fields).hex()), packet_id, K, V)")
+        }
+    }
+
+    fun formatBracketDict(
+        nodes: List<ProtobufFieldNode>,
+        varName: String = "fields",
+        indent: String = ""
+    ): String {
+        return buildString {
+            append("$indent$varName = {}")
+            if (nodes.isNotEmpty()) {
+                appendLine()
+                val grouped = nodes.groupBy { it.fieldNumber }
+                val entries = grouped.entries.toList()
+                entries.forEachIndexed { idx, (fieldNum, items) ->
+                    val target = "$varName[$fieldNum]"
+                    if (items.size == 1) {
+                        appendBracketEntry(
+                            out = this,
+                            prefix = target,
+                            node = items.first(),
+                            indent = indent,
+                            trailingNewline = idx < entries.lastIndex
+                        )
+                    } else {
+                        val listItems = items.joinToString(", ") { formatSingleValue(it, 1) }
+                        if (idx < entries.lastIndex) {
+                            appendLine("$indent$target = [$listItems]")
+                        } else {
+                            append("$indent$target = [$listItems]")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun appendBracketEntry(
+        out: StringBuilder,
+        prefix: String,
+        node: ProtobufFieldNode,
+        indent: String,
+        eqPadding: String = "",
+        trailingNewline: Boolean = true
+    ) {
+        when {
+            node.isEmptyMessage -> {
+                if (trailingNewline) out.appendLine("$indent$prefix$eqPadding = {}")
+                else out.append("$indent$prefix$eqPadding = {}")
+            }
+            node.children.isNotEmpty() -> {
+                out.appendLine("$indent$prefix$eqPadding = {}")
+                val grouped = node.children.groupBy { it.fieldNumber }
+                val entries = grouped.entries.toList()
+                entries.forEachIndexed { idx, (subNum, subItems) ->
+                    val isLast = idx == entries.lastIndex
+                    val subPrefix = "$prefix[$subNum]"
+                    if (subItems.size == 1) {
+                        appendBracketEntry(
+                            out = out,
+                            prefix = subPrefix,
+                            node = subItems.first(),
+                            indent = indent,
+                            trailingNewline = if (isLast) trailingNewline else true
+                        )
+                    } else {
+                        val listItems = subItems.joinToString(", ") { formatSingleValue(it, 1) }
+                        if (!isLast || trailingNewline) {
+                            out.appendLine("$indent$subPrefix = [$listItems]")
+                        } else {
+                            out.append("$indent$subPrefix = [$listItems]")
+                        }
+                    }
+                }
+            }
+            else -> {
+                val scalar = formatSingleValue(node, 0)
+                if (trailingNewline) out.appendLine("$indent$prefix$eqPadding = $scalar")
+                else out.append("$indent$prefix$eqPadding = $scalar")
+            }
+        }
+    }
+
+    private fun toSnakeCaseEndpoint(endpointOrPath: String): String {
+        val raw = endpointOrPath
+            .substringBefore("?")
+            .substringAfterLast("/")
+            .substringAfterLast(":")
+            .replace(Regex("[^A-Za-z0-9_]"), "_")
+            .trim('_')
+        if (raw.isBlank()) return "packet_payload"
+        val snake = raw
+            .replace(Regex("([a-z0-9])([A-Z])"), "$1_$2")
+            .replace(Regex("([A-Z]+)([A-Z][a-z])"), "$1_$2")
+            .lowercase(java.util.Locale.US)
+            .replace(Regex("_+"), "_")
+            .trim('_')
+        return if (snake.firstOrNull()?.isDigit() == true) "pkt_$snake" else snake.ifBlank { "packet_payload" }
+    }
+
+    private fun escapePythonStr(input: String): String {
+        return input
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+    }
+
     private fun formatObject(nodes: List<ProtobufFieldNode>, indentLevel: Int): String {
         if (nodes.isEmpty()) return "{}"
         val pad = "    ".repeat(indentLevel + 1)
@@ -807,10 +1015,7 @@ object ProtobufFieldsFormatter {
             node.isEmptyMessage -> "{}"
             node.children.isNotEmpty() -> formatObject(node.children, indentLevel)
             node.wireTypeName.startsWith("STRING") -> {
-                val raw = node.jsonValue.toString()
-                    .replace("\\", "\\\\")
-                    .replace("\"", "\\\"")
-                "\"$raw\""
+                "\"${escapePythonStr(node.jsonValue.toString())}\""
             }
             node.wireTypeName.startsWith("BYTES") -> {
                 "bytes.fromhex(\"${node.jsonValue}\")"

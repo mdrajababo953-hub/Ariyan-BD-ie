@@ -233,6 +233,13 @@ class PacketDecodersTest {
         val res = result.getOrThrow()
         assertEquals(1, res.decodedCount)
         assertTrue(res.displayPath.contains("Aryan"))
+        assertTrue(res.fileName.startsWith("ARIYAN_A9X_HTTPS_"))
+        assertTrue(res.fileName.endsWith(".txt"))
+        assertTrue(res.packageContent.contains("https://clientbp.ggpolarbear.com/GetLikedRecord"))
+        assertTrue(res.packageContent.contains("Request Hex:\n1a725b2c56ec52ba7d09623454c0a003"))
+        assertTrue(res.packageContent.contains("Response Hex:\n0a00"))
+        assertTrue(res.packageContent.contains("response_fields = {}"))
+        assertTrue(res.packageContent.contains("response_fields[1] = {}"))
 
         val arr = org.json.JSONArray(res.jsonContent)
         assertEquals(1, arr.length())
@@ -361,5 +368,95 @@ class PacketDecodersTest {
         assertEquals(PayloadClassification.ENCRYPTED_BLOCK, hugeClass)
         val analysis = PayloadAnalyzer.analyze(hugeHex)
         assertEquals(131_072, analysis.byteCount)
+    }
+
+    @Test
+    fun `smart python package formats login payload, nested endpoint package, and multi-entry report separation`() {
+        fun pbString(fieldNum: Int, value: String): ByteArray {
+            val tag = (fieldNum shl 3) or 2
+            val bytes = value.toByteArray(Charsets.UTF_8)
+            val out = java.io.ByteArrayOutputStream()
+            fun writeVarint(v: Int) {
+                var x = v
+                while ((x and 0x7F.inv()) != 0) {
+                    out.write((x and 0x7F) or 0x80)
+                    x = x ushr 7
+                }
+                out.write(x)
+            }
+            writeVarint(tag)
+            writeVarint(bytes.size)
+            out.write(bytes)
+            return out.toByteArray()
+        }
+
+        // Login payload: field 3 timestamp, field 4 "free fire", field 22 token, field 26 "IND", field 29 open_id
+        val loginBytes = pbString(3, "2026-11-25 00:01:39") +
+            pbString(4, "free fire") +
+            pbString(22, "tok_abc123") +
+            pbString(26, "IND") +
+            pbString(29, "oid_999")
+        val loginHex = HexUtils.bytesToHex(loginBytes)
+        val loginAnalysis = PayloadAnalyzer.analyze(loginHex)
+        assertEquals(PayloadClassification.PROTOBUF, loginAnalysis.classification)
+        val loginPy = com.example.decoder.ProtobufFieldsFormatter.formatSmartPythonPackage(
+            nodes = loginAnalysis.protobuf!!.fields,
+            endpointOrPath = "/GetLoginData",
+            isResponse = false
+        )
+        assertTrue(loginPy.contains("def build_login_payload(access_token, open_id, region=\"IND\", server_time_str=None):"))
+        assertTrue(loginPy.contains("P = {}"))
+        assertTrue(loginPy.contains("P[3]  = server_time_str"))
+        assertTrue(loginPy.contains("P[4]  = \"free fire\""))
+        assertTrue(loginPy.contains("P[22] = access_token"))
+        assertTrue(loginPy.contains("P[26] = region"))
+        assertTrue(loginPy.contains("P[29] = open_id"))
+        assertTrue(loginPy.contains("raw = pb(P)"))
+        assertTrue(loginPy.contains("return enc(xK, xV, raw)"))
+
+        // General nested endpoint payload: /UpdateSocialBasicInfo
+        // field 1 = 13 (08 0D), field 2 = { 1: 1 (08 01), 2: "bio" (12 03 62 69 6f) } -> 12 07 08 01 12 03 62 69 6f
+        val nestedHex = "080d12070801120362696f"
+        val nestedAnalysis = PayloadAnalyzer.analyze(nestedHex)
+        assertEquals(PayloadClassification.PROTOBUF, nestedAnalysis.classification)
+        val endpointPy = com.example.decoder.ProtobufFieldsFormatter.formatSmartPythonPackage(
+            nodes = nestedAnalysis.protobuf!!.fields,
+            endpointOrPath = "/UpdateSocialBasicInfo",
+            isResponse = false
+        )
+        assertTrue(endpointPy.contains("def update_social_basic_info(K, V):"))
+        assertTrue(endpointPy.contains("packet_id = '0E15'"))
+        assertTrue(endpointPy.contains("fields = {}"))
+        assertTrue(endpointPy.contains("fields[1] = 13"))
+        assertTrue(endpointPy.contains("fields[2] = {}"))
+        assertTrue(endpointPy.contains("fields[2][1] = 1"))
+        assertTrue(endpointPy.contains("fields[2][2] = \"bio\""))
+        assertTrue(endpointPy.contains("return iZ(str(gZ(fields).hex()), packet_id, K, V)"))
+
+        // Multi-entry batch package report checks 6-newline separation between APIs
+        val p1 = com.example.data.db.CapturedPacketEntity(
+            id = 1, sessionId = 1, timestamp = 1000L, method = "POST",
+            url = "https://client.ind.freefiremobile.com/GetLoginData",
+            host = "client.ind.freefiremobile.com", path = "/GetLoginData", port = 443,
+            protocol = "HTTPS", statusCode = 200, requestHeadersJson = "{}",
+            requestBodyHex = loginHex, responseHeadersJson = "{}", responseBodyHex = "0801",
+            durationMs = 5, bytesTx = 10, bytesRx = 2, isBlocked = false, blockReason = null
+        )
+        val p2 = p1.copy(
+            id = 2,
+            url = "https://client.ind.freefiremobile.com/UpdateSocialBasicInfo",
+            path = "/UpdateSocialBasicInfo",
+            requestBodyHex = nestedHex,
+            responseBodyHex = ""
+        )
+        val (report, arr) = com.example.decoder.BatchDecodeExporter.buildPremiumPackageReport(
+            session = null,
+            packets = listOf(p1, p2),
+            scope = com.example.decoder.FullDecodeScope.HTTP_HTTPS
+        )
+        assertEquals(2, arr.length())
+        assertTrue(report.contains("https://client.ind.freefiremobile.com/GetLoginData\n\nRequest Hex:\n$loginHex\n\nResponse Hex:\n0801"))
+        assertTrue(report.contains("\n\n\n\n\n\nhttps://client.ind.freefiremobile.com/UpdateSocialBasicInfo"))
+        assertTrue(report.contains("Response Hex:\n<Empty>"))
     }
 }

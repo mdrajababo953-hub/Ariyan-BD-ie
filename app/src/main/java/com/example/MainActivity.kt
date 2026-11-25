@@ -12,6 +12,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -53,6 +59,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,6 +68,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -76,6 +84,7 @@ import com.example.ui.screens.DecoderLabScreen
 import com.example.ui.screens.FullDecodeDialog
 import com.example.ui.screens.ImportRawDialog
 import com.example.ui.screens.PacketDetailScreen
+import com.example.ui.screens.PremiumIntroScreen
 import com.example.ui.screens.SessionsScreen
 import com.example.ui.screens.TargetAppPickerSheet
 import com.example.ui.screens.TrafficRulesScreen
@@ -105,7 +114,23 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            NetTraceRoot()
+            var hasEnteredApp by rememberSaveable { mutableStateOf(false) }
+            AnimatedContent(
+                targetState = hasEnteredApp,
+                transitionSpec = {
+                    (fadeIn(tween(420)) + scaleIn(initialScale = 0.96f, animationSpec = tween(420)))
+                        .togetherWith(fadeOut(tween(280)))
+                },
+                label = "intro_to_app"
+            ) { entered ->
+                if (!entered) {
+                    NetTraceTheme(darkTheme = true) {
+                        PremiumIntroScreen(onEnterClick = { hasEnteredApp = true })
+                    }
+                } else {
+                    NetTraceRoot()
+                }
+            }
         }
     }
 }
@@ -326,6 +351,61 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
         }
     }
 
+    val sharePackageText: (String) -> Unit = { pkgText ->
+        if (pkgText.length <= 100_000) {
+            runCatching {
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "ARIYAN A9X Pro Package Report")
+                    putExtra(Intent.EXTRA_TEXT, pkgText)
+                }
+                context.startActivity(Intent.createChooser(intent, "Share Pro Package Report"))
+            }.onFailure {
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("Unable to share package: ${it.message ?: "no app found"}")
+                }
+            }
+        } else {
+            coroutineScope.launch {
+                val shareResult = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
+                        exportDir.listFiles()?.forEach { old ->
+                            if (System.currentTimeMillis() - old.lastModified() > 3_600_000L) {
+                                old.delete()
+                            }
+                        }
+                        val outFile = File(exportDir, "ARIYAN_A9X_Package_${System.currentTimeMillis()}.txt")
+                        outFile.writeText(pkgText, Charsets.UTF_8)
+                        FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.fileprovider",
+                            outFile
+                        )
+                    }
+                }
+                shareResult.fold(
+                    onSuccess = { uri ->
+                        runCatching {
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "ARIYAN A9X Pro Package Report")
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(intent, "Share Pro Package Report"))
+                        }.onFailure { err ->
+                            snackbarHostState.showSnackbar("Share failed: ${err.message}")
+                        }
+                    },
+                    onFailure = { err ->
+                        snackbarHostState.showSnackbar("Export file error: ${err.message}")
+                    }
+                )
+            }
+        }
+    }
+
     val targetAppInfo = remember(installedApps, settings.targetApp.packageName) {
         installedApps.firstOrNull { it.packageName == settings.targetApp.packageName }
     }
@@ -364,13 +444,16 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
                                         text = stringResource(R.string.app_name),
-                                        style = MaterialTheme.typography.titleLarge
+                                        style = MaterialTheme.typography.titleMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
                                     if (proxyState.isRunning) {
-                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
                                         TagChip(text = "PROXY :${proxyState.port}", color = EmeraldPulse)
                                     } else if (vpnState.isRunning) {
-                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
                                         TagChip(text = "VPN ACTIVE", color = EmeraldPulse)
                                     }
                                 }
@@ -636,7 +719,7 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
             FullDecodeDialog(
                 state = fullDecodeState,
                 onSelectAndRun = vm::runFullDecode,
-                onShareJson = shareJsonText,
+                onSharePackage = sharePackageText,
                 onDismiss = vm::dismissFullDecodeDialog
             )
         }

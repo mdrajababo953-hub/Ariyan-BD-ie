@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">NetTrace</string>
-    <string name="vpn_channel_name">NetTrace Capture Engine</string>
+    <string name="app_name">ARIYAN A9X BD CAPTURE</string>
+    <string name="vpn_channel_name">ARIYAN A9X Capture Engine</string>
     <string name="vpn_channel_desc">Displays active per-app traffic capture status</string>
     <string name="vpn_notif_title">Capturing %1$s</string>
     <string name="vpn_notif_text">Isolated to %1$s • %2$d packets</string>

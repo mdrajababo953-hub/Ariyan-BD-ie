@@ -509,7 +509,7 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
                         result = res,
                         error = null
                     )
-                    _snackbarMessage.value = "Saved ${res.decodedCount} decoded requests to ${res.displayPath}"
+                    _snackbarMessage.value = "Saved ${res.decodedCount} Pro Packages to ${res.displayPath}"
                 },
                 onFailure = { err ->
                     _fullDecodeState.value = _fullDecodeState.value.copy(

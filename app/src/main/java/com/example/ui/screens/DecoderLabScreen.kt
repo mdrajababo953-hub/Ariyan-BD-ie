@@ -181,6 +181,14 @@ fun DecoderLabScreen(
 
                             analysis.protobuf?.let { proto ->
                                 val hdrHex = state.headerHexPreview.ifBlank { "0E15" }
+                                val packagePy = remember(proto, hdrHex) {
+                                    ProtobufFieldsFormatter.formatSmartPythonPackage(
+                                        nodes = proto.fields,
+                                        endpointOrPath = "Packet",
+                                        isResponse = false,
+                                        packetHeaderHex = hdrHex
+                                    )
+                                }
                                 val asyncSnippet = remember(proto, hdrHex) {
                                     ProtobufFieldsFormatter.formatAsyncSnippet(
                                         nodes = proto.fields,
@@ -190,7 +198,7 @@ fun DecoderLabScreen(
                                 }
                                 Spacer(modifier = Modifier.height(10.dp))
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    listOf("Fields {}", "async def", "Tree", "JSON").forEachIndexed { idx, label ->
+                                    listOf("Package PY", "Fields {}", "async def", "Tree", "JSON").forEachIndexed { idx, label ->
                                         item {
                                             FilterChip(
                                                 selected = protoViewMode == idx,
@@ -203,16 +211,21 @@ fun DecoderLabScreen(
                                 Spacer(modifier = Modifier.height(8.dp))
                                 when (protoViewMode) {
                                     0 -> PythonFieldsCodeBlock(
+                                        code = packagePy,
+                                        title = "Pro Python Package Builder",
+                                        onCopy = { onCopyToast("Python package copied") }
+                                    )
+                                    1 -> PythonFieldsCodeBlock(
                                         code = proto.fieldsDictFormatted,
                                         title = "Protobuf Fields Dict",
                                         onCopy = { onCopyToast("Protobuf fields copied") }
                                     )
-                                    1 -> PythonFieldsCodeBlock(
+                                    2 -> PythonFieldsCodeBlock(
                                         code = asyncSnippet,
                                         title = "Async Packet Builder Snippet",
                                         onCopy = { onCopyToast("Async snippet copied") }
                                     )
-                                    2 -> ProtobufTreeView(fields = proto.fields)
+                                    3 -> ProtobufTreeView(fields = proto.fields)
                                     else -> SyntaxHighlightedJsonBlock(
                                         json = proto.jsonFormatted,
                                         title = "Protobuf JSON Output",
@@ -321,6 +334,14 @@ fun DecoderLabScreen(
                                 Spacer(modifier = Modifier.height(6.dp))
                                 dec.protobuf?.let { p ->
                                     val hdrHex = state.headerHexPreview.ifBlank { "0E15" }
+                                    val packagePy = remember(p, hdrHex) {
+                                        ProtobufFieldsFormatter.formatSmartPythonPackage(
+                                            nodes = p.fields,
+                                            endpointOrPath = "Packet",
+                                            isResponse = false,
+                                            packetHeaderHex = hdrHex
+                                        )
+                                    }
                                     val asyncSnippet = remember(p, hdrHex) {
                                         ProtobufFieldsFormatter.formatAsyncSnippet(
                                             nodes = p.fields,
@@ -329,7 +350,7 @@ fun DecoderLabScreen(
                                         )
                                     }
                                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        listOf("Fields {}", "async def", "Tree", "JSON").forEachIndexed { idx, label ->
+                                        listOf("Package PY", "Fields {}", "async def", "Tree", "JSON").forEachIndexed { idx, label ->
                                             item {
                                                 FilterChip(
                                                     selected = decryptedViewMode == idx,
@@ -342,16 +363,21 @@ fun DecoderLabScreen(
                                     Spacer(modifier = Modifier.height(6.dp))
                                     when (decryptedViewMode) {
                                         0 -> PythonFieldsCodeBlock(
+                                            code = packagePy,
+                                            title = "Decrypted Pro Package (PY)",
+                                            onCopy = { onCopyToast("Python package copied") }
+                                        )
+                                        1 -> PythonFieldsCodeBlock(
                                             code = p.fieldsDictFormatted,
                                             title = "Decrypted Fields {}",
                                             onCopy = { onCopyToast("Decrypted fields copied") }
                                         )
-                                        1 -> PythonFieldsCodeBlock(
+                                        2 -> PythonFieldsCodeBlock(
                                             code = asyncSnippet,
                                             title = "Async Packet Builder Snippet",
                                             onCopy = { onCopyToast("Async snippet copied") }
                                         )
-                                        2 -> ProtobufTreeView(fields = p.fields)
+                                        3 -> ProtobufTreeView(fields = p.fields)
                                         else -> SyntaxHighlightedJsonBlock(
                                             json = p.jsonFormatted,
                                             title = "Decrypted Protobuf JSON",

@@ -1,6 +1,6 @@
 {
-  "name": "NetTrace",
-  "description": "Per-app VPN traffic capture, firewall control, session recording, and deep JSON, JWT & Protobuf hex decoder for Android games and apps.",
+  "name": "ARIYAN A9X BD CAPTURE",
+  "description": "Per-app VPN & proxy packet capture with pro Protobuf-to-Python package builder and batch Aryan decoder.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

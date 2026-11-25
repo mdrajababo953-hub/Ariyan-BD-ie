@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -403,6 +404,7 @@ private fun DecodeTabContent(
                     PayloadDecodedSection(
                         title = "Request Decoded View",
                         endpointPath = packet.path,
+                        isResponse = false,
                         analysis = reqAnalysis,
                         rawHex = packet.requestBodyHex,
                         onCopyToast = onCopyToast,
@@ -414,6 +416,7 @@ private fun DecodeTabContent(
                     PayloadDecodedSection(
                         title = "Response Decoded View",
                         endpointPath = packet.path,
+                        isResponse = true,
                         analysis = respAnalysis,
                         rawHex = packet.responseBodyHex,
                         onCopyToast = onCopyToast,
@@ -556,6 +559,7 @@ fun JwtDecodedCard(
 fun PayloadDecodedSection(
     title: String,
     endpointPath: String = "/Packet",
+    isResponse: Boolean = false,
     analysis: PayloadAnalysis,
     rawHex: String,
     onCopyToast: (String) -> Unit,
@@ -620,6 +624,20 @@ fun PayloadDecodedSection(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 analysis.protobuf?.let { proto ->
+                    val packagePySnippet by produceState(
+                        initialValue = "",
+                        key1 = proto,
+                        key2 = endpointPath,
+                        key3 = isResponse
+                    ) {
+                        value = withContext(Dispatchers.Default) {
+                            ProtobufFieldsFormatter.formatSmartPythonPackage(
+                                nodes = proto.fields,
+                                endpointOrPath = endpointPath,
+                                isResponse = isResponse
+                            )
+                        }
+                    }
                     val asyncSnippet by produceState(
                         initialValue = "",
                         key1 = proto,
@@ -629,31 +647,37 @@ fun PayloadDecodedSection(
                             ProtobufFieldsFormatter.formatAsyncSnippet(proto.fields, endpointPath)
                         }
                     }
-                    Row(
+                    LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        listOf("JSON", "Fields {}", "async def", "Tree").forEachIndexed { idx, label ->
+                        val labels = listOf("Package PY", "JSON", "Fields {}", "async def", "Tree")
+                        items(labels.size) { idx ->
                             FilterChip(
                                 selected = protoViewMode == idx,
                                 onClick = { protoViewMode = idx },
-                                label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                                label = { Text(labels[idx], style = MaterialTheme.typography.labelSmall) }
                             )
                         }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     when (protoViewMode) {
-                        0 -> SyntaxHighlightedJsonBlock(
+                        0 -> PythonFieldsCodeBlock(
+                            code = packagePySnippet,
+                            title = if (isResponse) "Decoded Response Package (PY)" else "Pro Python Package Builder",
+                            onCopy = { onCopyToast("Python package copied") }
+                        )
+                        1 -> SyntaxHighlightedJsonBlock(
                             json = proto.jsonFormatted,
                             title = "Decoded Protobuf JSON",
                             onCopy = { onCopyToast("Protobuf JSON copied") }
                         )
-                        1 -> PythonFieldsCodeBlock(
+                        2 -> PythonFieldsCodeBlock(
                             code = proto.fieldsDictFormatted,
                             title = "Protobuf Fields Dict",
                             onCopy = { onCopyToast("Protobuf fields copied") }
                         )
-                        2 -> PythonFieldsCodeBlock(
+                        3 -> PythonFieldsCodeBlock(
                             code = asyncSnippet,
                             title = "Async Packet Builder Snippet",
                             onCopy = { onCopyToast("Async snippet copied") }

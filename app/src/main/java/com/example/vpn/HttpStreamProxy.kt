@@ -59,7 +59,8 @@ interface HttpCaptureCallbacks {
 
 object HttpStreamProxy {
 
-    const val MAX_CAPTURE_BYTES = 65536
+    const val MAX_CAPTURE_BYTES = 131_072
+    private const val MAX_COMPRESSED_CAPTURE_BYTES = 524_288
 
     private val HTTP_METHODS = setOf(
         "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT"
@@ -161,7 +162,11 @@ object HttpStreamProxy {
                     }
 
                     val pendingReq = pendingQueue.receiveCatching().getOrNull()
-                    val bodyCollector = BoundedByteCollector(MAX_CAPTURE_BYTES)
+                    val isRespCompressed = !parsed.contentEncoding.isNullOrBlank() &&
+                        (parsed.contentEncoding.contains("gzip", true) || parsed.contentEncoding.contains("deflate", true))
+                    val bodyCollector = BoundedByteCollector(
+                        if (isRespCompressed) MAX_COMPRESSED_CAPTURE_BYTES else MAX_CAPTURE_BYTES
+                    )
                     var rawBodyCount = 0
 
                     val noBody = parsed.statusCode == 204 ||
@@ -221,7 +226,11 @@ object HttpStreamProxy {
                 serverOut.flush()
                 callbacks.onBytesTransferred(headerBytes.size)
 
-                val reqBodyCollector = BoundedByteCollector(MAX_CAPTURE_BYTES)
+                val isReqCompressed = !reqHeader.contentEncoding.isNullOrBlank() &&
+                    (reqHeader.contentEncoding.contains("gzip", true) || reqHeader.contentEncoding.contains("deflate", true))
+                val reqBodyCollector = BoundedByteCollector(
+                    if (isReqCompressed) MAX_COMPRESSED_CAPTURE_BYTES else MAX_CAPTURE_BYTES
+                )
                 val reqBodyCount = when {
                     reqHeader.isChunked -> forwardChunkedBody(bufferedClient, serverOut, reqBodyCollector, callbacks)
                     reqHeader.contentLength > 0L -> forwardFixedBody(bufferedClient, serverOut, reqHeader.contentLength, reqBodyCollector, callbacks)
@@ -580,15 +589,27 @@ object HttpStreamProxy {
         val enc = encoding.lowercase(Locale.US)
         return when {
             enc.contains("gzip") -> runCatching {
-                GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+                GZIPInputStream(ByteArrayInputStream(bytes)).use { readBounded(it, MAX_CAPTURE_BYTES) }
             }.getOrDefault(bytes)
             enc.contains("deflate") -> runCatching {
-                InflaterInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+                InflaterInputStream(ByteArrayInputStream(bytes)).use { readBounded(it, MAX_CAPTURE_BYTES) }
             }.recoverCatching {
-                InflaterInputStream(ByteArrayInputStream(bytes), Inflater(true)).use { it.readBytes() }
+                InflaterInputStream(ByteArrayInputStream(bytes), Inflater(true)).use { readBounded(it, MAX_CAPTURE_BYTES) }
             }.getOrDefault(bytes)
             else -> bytes
         }
+    }
+
+    private fun readBounded(input: InputStream, maxBytes: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(4096)
+        while (out.size() < maxBytes) {
+            val toRead = minOf(buf.size, maxBytes - out.size())
+            val n = runCatching { input.read(buf, 0, toRead) }.getOrDefault(-1)
+            if (n <= 0) break
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 
     private class BoundedByteCollector(private val maxBytes: Int) {

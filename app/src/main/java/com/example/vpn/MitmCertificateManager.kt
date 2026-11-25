@@ -281,7 +281,7 @@ class MitmCertificateManager(private val context: Context) {
             value = derSequence(derOid(byteArrayOf(0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01)))
         )
 
-        val isIpLiteral = hostname.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))
+        val isIpLiteral = hostname.contains(":") || hostname.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))
         val sanEntry = if (isIpLiteral) {
             val ipBytes = InetAddress.getByName(hostname).address
             derTag(0x87, ipBytes) // [7] iPAddress

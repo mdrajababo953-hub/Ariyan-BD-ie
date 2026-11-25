@@ -254,6 +254,7 @@ class NetTraceVpnService : VpnService() {
         mitmEnabled = enableMitm
         caTrustedByDevice = false
         caTrustChecked = false
+        pinningBypassedHosts.clear()
         packetCounter.set(0)
         skippedCounter.set(0)
         blockedCounter.set(0)

@@ -153,6 +153,8 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
     val trafficRules by vm.trafficRules.collectAsStateWithLifecycle()
     val decoderLabState by vm.decoderLab.collectAsStateWithLifecycle()
     val fullDecodeState by vm.fullDecodeState.collectAsStateWithLifecycle()
+    val sessionCryptoState by vm.sessionCryptoState.collectAsStateWithLifecycle()
+    val sessionKeyIvCandidates by vm.sessionKeyIvCandidates.collectAsStateWithLifecycle()
     val caReady by vm.caReady.collectAsStateWithLifecycle()
     val caTrusted by vm.caTrusted.collectAsStateWithLifecycle()
     val totalPacketCount by vm.totalSessionPacketCount.collectAsStateWithLifecycle()
@@ -423,6 +425,9 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                 PacketDetailScreen(
                     packet = selectedPacket!!,
                     isPaneMode = false,
+                    sessionKeyIvCandidates = sessionKeyIvCandidates,
+                    sessionCryptoState = sessionCryptoState,
+                    onSaveSessionKey = vm::updateSessionCrypto,
                     onBack = { vm.selectPacket(null) },
                     onShareJson = shareJsonText,
                     onSendToDecoderLab = { hex ->
@@ -619,6 +624,9 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
                                     httpsMitmEnabled = settings.httpsMitmEnabled,
                                     caReady = caReady,
                                     caTrusted = caTrusted,
+                                    sessionKeyIvCandidates = sessionKeyIvCandidates,
+                                    sessionCryptoState = sessionCryptoState,
+                                    onSaveSessionKey = vm::updateSessionCrypto,
                                     onModeChange = vm::setCaptureMode,
                                     onToggleVpnFullPacket = vm::toggleVpnFullPacket,
                                     onStartLocalProxy = startProxyWithPermissions,
@@ -718,7 +726,10 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
         if (fullDecodeState.isDialogOpen) {
             FullDecodeDialog(
                 state = fullDecodeState,
-                onSelectAndRun = vm::runFullDecode,
+                sessionCryptoState = sessionCryptoState,
+                onSelectAndRun = { scope, key, iv, isHex ->
+                    vm.runFullDecode(scope, key, iv, isHex)
+                },
                 onSharePackage = sharePackageText,
                 onDismiss = vm::dismissFullDecodeDialog
             )

@@ -22,6 +22,8 @@ import com.example.decoder.PayloadAnalysis
 import com.example.decoder.PayloadAnalyzer
 import com.example.decoder.PayloadClassification
 import com.example.decoder.PayloadDecryptor
+import com.example.decoder.SessionCryptoResolver
+import com.example.decoder.SessionKeyIv
 import com.example.data.prefs.CaptureEngineMode
 import com.example.proxy.LocalForwardProxyEngine
 import com.example.proxy.LocalForwardProxyService
@@ -65,6 +67,12 @@ data class FullDecodeUiState(
     val targetSessionId: Long? = null,
     val result: FullDecodeResult? = null,
     val error: String? = null
+)
+
+data class SessionCryptoUiState(
+    val manualKey: String = "",
+    val manualIv: String = "",
+    val manualKeyIsHex: Boolean = false
 )
 
 data class DecoderLabState(
@@ -166,10 +174,25 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         allSessions.firstOrNull { it.id == effectiveId }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    private val _sessionCryptoState = MutableStateFlow(SessionCryptoUiState())
+    val sessionCryptoState: StateFlow<SessionCryptoUiState> = _sessionCryptoState.asStateFlow()
+
     val sessionPackets: StateFlow<List<CapturedPacketEntity>> = activeSession.flatMapLatest { session ->
         if (session == null) flowOf(emptyList())
         else repo.observePacketsForSession(session.id)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val sessionKeyIvCandidates: StateFlow<List<SessionKeyIv>> = combine(
+        sessionPackets,
+        _sessionCryptoState
+    ) { packets, crypto ->
+        SessionCryptoResolver.buildCandidateKeyIvPairs(
+            sessionPackets = packets,
+            manualKey = crypto.manualKey,
+            manualIv = crypto.manualIv,
+            manualIsHex = crypto.manualKeyIsHex
+        )
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val totalSessionPacketCount: StateFlow<Int> = sessionPackets
         .map { it.size }
@@ -471,13 +494,43 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun runFullDecode(scope: FullDecodeScope) {
+    fun updateSessionCrypto(key: String, iv: String, keyIsHex: Boolean) {
+        _sessionCryptoState.value = SessionCryptoUiState(
+            manualKey = key.trim(),
+            manualIv = iv.trim(),
+            manualKeyIsHex = keyIsHex
+        )
+        _decoderLab.update { cur ->
+            cur.copy(
+                keyInput = key.trim(),
+                ivInput = iv.trim(),
+                keyIsHex = keyIsHex
+            )
+        }
+        if (key.isNotBlank()) {
+            _snackbarMessage.value = "Session AES Key/IV saved — encrypted requests will auto-decode."
+        }
+    }
+
+    fun runFullDecode(
+        scope: FullDecodeScope,
+        manualKey: String = _sessionCryptoState.value.manualKey,
+        manualIv: String = _sessionCryptoState.value.manualIv,
+        manualKeyIsHex: Boolean = _sessionCryptoState.value.manualKeyIsHex
+    ) {
         val targetSid = _fullDecodeState.value.targetSessionId ?: activeSession.value?.id
         if (targetSid == null || targetSid == 0L) {
             _fullDecodeState.value = _fullDecodeState.value.copy(
                 error = "No active capture session found."
             )
             return
+        }
+        if (manualKey.isNotBlank()) {
+            _sessionCryptoState.value = SessionCryptoUiState(
+                manualKey = manualKey.trim(),
+                manualIv = manualIv.trim(),
+                manualKeyIsHex = manualKeyIsHex
+            )
         }
         viewModelScope.launch {
             _fullDecodeState.value = _fullDecodeState.value.copy(
@@ -495,6 +548,9 @@ class NetTraceViewModel(application: Application) : AndroidViewModel(application
                 session = sessionEntity,
                 packets = packets,
                 scope = scope,
+                manualKey = manualKey,
+                manualIv = manualIv,
+                manualKeyIsHex = manualKeyIsHex,
                 onProgress = { done, total ->
                     _fullDecodeState.value = _fullDecodeState.value.copy(
                         processed = done,

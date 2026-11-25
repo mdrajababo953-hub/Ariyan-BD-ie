@@ -67,6 +67,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.R
 import com.example.data.db.CapturedPacketEntity
+import com.example.decoder.AutoDecryptMatch
 import com.example.decoder.BatchDecodeExporter
 import com.example.decoder.DecryptMode
 import com.example.decoder.HexUtils
@@ -78,6 +79,8 @@ import com.example.decoder.PayloadAnalyzer
 import com.example.decoder.PayloadClassification
 import com.example.decoder.PayloadDecryptor
 import com.example.decoder.ProtobufFieldsFormatter
+import com.example.decoder.SessionCryptoResolver
+import com.example.decoder.SessionKeyIv
 import com.example.ui.components.AppIcons
 import com.example.ui.components.Formatters
 import com.example.ui.components.MethodBadge
@@ -90,9 +93,11 @@ import com.example.ui.theme.CoralAlert
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.VioletProto
+import com.example.ui.viewmodel.SessionCryptoUiState
 
 private data class PacketDetailComputed(
     val packetJson: String,
+    val requestPackageText: String,
     val fullPackageText: String,
     val reqDecodedText: String?,
     val respDecodedText: String?,
@@ -100,6 +105,7 @@ private data class PacketDetailComputed(
     val respHeaders: Map<String, String>,
     val jwtDecoded: JwtDecodeResult?,
     val reqAnalysis: PayloadAnalysis,
+    val autoDecryptMatch: AutoDecryptMatch?,
     val respAnalysis: PayloadAnalysis
 )
 
@@ -108,6 +114,9 @@ private data class PacketDetailComputed(
 fun PacketDetailScreen(
     packet: CapturedPacketEntity,
     isPaneMode: Boolean,
+    sessionKeyIvCandidates: List<SessionKeyIv> = emptyList(),
+    sessionCryptoState: SessionCryptoUiState = SessionCryptoUiState(),
+    onSaveSessionKey: (key: String, iv: String, isHex: Boolean) -> Unit = { _, _, _ -> },
     onBack: () -> Unit,
     onShareJson: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit,
@@ -122,18 +131,25 @@ fun PacketDetailScreen(
 
     val computed by produceState<PacketDetailComputed?>(
         initialValue = null,
-        key1 = packet
+        key1 = packet,
+        key2 = sessionKeyIvCandidates
     ) {
         value = withContext(Dispatchers.Default) {
+            val (effectiveReqAnalysis, autoMatch) = SessionCryptoResolver.analyzeWithAutoDecrypt(
+                hexInput = packet.requestBodyHex,
+                candidates = sessionKeyIvCandidates
+            )
             PacketDetailComputed(
-                packetJson = PacketJsonSerializer.packetToFormattedJson(packet),
-                fullPackageText = BatchDecodeExporter.formatSinglePackageEntry(packet),
-                reqDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.requestBodyHex),
+                packetJson = PacketJsonSerializer.packetToFormattedJson(packet, sessionKeyIvCandidates),
+                requestPackageText = BatchDecodeExporter.formatRequestPackageOnly(packet, sessionKeyIvCandidates),
+                fullPackageText = BatchDecodeExporter.formatSinglePackageEntry(packet, sessionKeyIvCandidates),
+                reqDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.requestBodyHex, sessionKeyIvCandidates),
                 respDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.responseBodyHex),
                 reqHeaders = PacketJsonSerializer.parseHeadersMap(packet.requestHeadersJson),
                 respHeaders = PacketJsonSerializer.parseHeadersMap(packet.responseHeadersJson),
                 jwtDecoded = JwtDecoder.extractFromHeaders(packet.requestHeadersJson),
-                reqAnalysis = PayloadAnalyzer.analyze(packet.requestBodyHex),
+                reqAnalysis = effectiveReqAnalysis,
+                autoDecryptMatch = autoMatch,
                 respAnalysis = PayloadAnalyzer.analyze(packet.responseBodyHex)
             )
         }
@@ -216,11 +232,15 @@ fun PacketDetailScreen(
                 when (selectedTab) {
                     0 -> DecodeTabContent(
                         packet = packet,
+                        requestPackageText = ready.requestPackageText,
                         fullPackageText = ready.fullPackageText,
                         jwtDecoded = ready.jwtDecoded,
                         reqAnalysis = ready.reqAnalysis,
+                        autoDecryptMatch = ready.autoDecryptMatch,
                         respAnalysis = ready.respAnalysis,
-                        onSharePackage = { onShareJson(ready.fullPackageText) },
+                        sessionCryptoState = sessionCryptoState,
+                        onSaveSessionKey = onSaveSessionKey,
+                        onSharePackage = { onShareJson(ready.requestPackageText) },
                         onCopyToast = onCopyToast,
                         onSendToDecoderLab = onSendToDecoderLab
                     )
@@ -347,15 +367,20 @@ fun PacketDetailScreen(
 @Composable
 private fun DecodeTabContent(
     packet: CapturedPacketEntity,
+    requestPackageText: String,
     fullPackageText: String,
     jwtDecoded: JwtDecodeResult?,
     reqAnalysis: PayloadAnalysis,
+    autoDecryptMatch: AutoDecryptMatch?,
     respAnalysis: PayloadAnalysis,
+    sessionCryptoState: SessionCryptoUiState,
+    onSaveSessionKey: (key: String, iv: String, isHex: Boolean) -> Unit,
     onSharePackage: () -> Unit,
     onCopyToast: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
+    var showManualResponseDecode by remember(packet.id) { mutableStateOf(false) }
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
@@ -364,42 +389,45 @@ private fun DecodeTabContent(
             .fillMaxSize()
             .testTag("decode_request_response_switch")
     ) {
-        // 1. First & foremost: Request Package
+        // 1. First & foremost: Request Body decoded into its Python Package
         item {
             PayloadDecodedSection(
                 title = "Request Package",
                 endpointPath = packet.path,
                 isResponse = false,
                 analysis = reqAnalysis,
+                autoDecryptMatch = autoDecryptMatch,
                 rawHex = packet.requestBodyHex,
+                sessionCryptoState = sessionCryptoState,
+                onSaveSessionKey = onSaveSessionKey,
                 onCopyToast = onCopyToast,
                 onSendToDecoderLab = onSendToDecoderLab
             )
         }
 
-        // 2. Immediately second: Response Package
-        item {
-            PayloadDecodedSection(
-                title = "Response Package",
-                endpointPath = packet.path,
-                isResponse = true,
-                analysis = respAnalysis,
-                rawHex = packet.responseBodyHex,
-                onCopyToast = onCopyToast,
-                onSendToDecoderLab = onSendToDecoderLab
-            )
-        }
-
-        // 3. One-tap copy & share full combined package (URL + Hex + Request & Response Packages)
+        // 2. Quick copy & share Request / Full Package
         item {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Button(
                     onClick = {
+                        clipboard.setText(AnnotatedString(requestPackageText))
+                        onCopyToast("Request Package copied")
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("decode_copy_request_package_button")
+                ) {
+                    Icon(AppIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Copy Request", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                OutlinedButton(
+                    onClick = {
                         clipboard.setText(AnnotatedString(fullPackageText))
-                        onCopyToast("Full URL + Hex + Both Packages copied")
+                        onCopyToast("Full URL + Hex + Package copied")
                     },
                     modifier = Modifier
                         .weight(1f)
@@ -407,20 +435,18 @@ private fun DecodeTabContent(
                 ) {
                     Icon(AppIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Copy Full Package", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Full Package", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 OutlinedButton(
                     onClick = onSharePackage,
                     modifier = Modifier.testTag("decode_share_full_package_button")
                 ) {
                     Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Share")
                 }
             }
         }
 
-        // 4. Raw Body Hex overview (Request & Response)
+        // 3. Raw Body Hex overview (Request & Response Hex)
         item {
             DualBodyHexOverviewCard(
                 requestHex = packet.requestBodyHex,
@@ -429,6 +455,82 @@ private fun DecodeTabContent(
                 showResponse = true,
                 onCopyToast = onCopyToast
             )
+        }
+
+        // 4. Response Body: Manual Decode Only (never auto-decoded upfront)
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Response Body (Manual Decode)",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "${respAnalysis.byteCount}B • ${respAnalysis.classification.name} — tap to decode manually",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TagChip(
+                            text = if (showManualResponseDecode) "SHOWN" else "MANUAL",
+                            color = if (showManualResponseDecode) EmeraldPulse else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedButton(
+                            onClick = { showManualResponseDecode = !showManualResponseDecode },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("decode_manual_response_button")
+                        ) {
+                            Icon(AppIcons.DataObject, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (showManualResponseDecode) "Hide Response" else "Decode Response")
+                        }
+                        OutlinedButton(
+                            onClick = { onSendToDecoderLab(packet.responseBodyHex) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("decode_response_lab_button")
+                        ) {
+                            Icon(AppIcons.Code, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Open in Lab")
+                        }
+                    }
+
+                    AnimatedVisibility(visible = showManualResponseDecode) {
+                        Column(modifier = Modifier.padding(top = 12.dp)) {
+                            PayloadDecodedSection(
+                                title = "Response Package",
+                                endpointPath = packet.path,
+                                isResponse = true,
+                                analysis = respAnalysis,
+                                rawHex = packet.responseBodyHex,
+                                sessionCryptoState = sessionCryptoState,
+                                onSaveSessionKey = onSaveSessionKey,
+                                onCopyToast = onCopyToast,
+                                onSendToDecoderLab = onSendToDecoderLab
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // 5. JWT Claims (if Authorization Bearer JWT is present)
@@ -688,16 +790,29 @@ fun PayloadDecodedSection(
     endpointPath: String = "/Packet",
     isResponse: Boolean = false,
     analysis: PayloadAnalysis,
+    autoDecryptMatch: AutoDecryptMatch? = null,
     rawHex: String,
+    sessionCryptoState: SessionCryptoUiState = SessionCryptoUiState(),
+    onSaveSessionKey: (key: String, iv: String, isHex: Boolean) -> Unit = { _, _, _ -> },
     onCopyToast: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit
 ) {
     val decryptScope = rememberCoroutineScope()
     var protoViewMode by remember(rawHex) { mutableIntStateOf(0) }
-    var showDecryptor by remember(rawHex) { mutableStateOf(false) }
-    var keyInput by remember { mutableStateOf("") }
-    var ivInput by remember { mutableStateOf("") }
-    var keyIsHex by remember { mutableStateOf(false) }
+    var decryptedProtoViewMode by remember(rawHex) { mutableIntStateOf(0) }
+    var showDecryptor by remember(rawHex, autoDecryptMatch) {
+        mutableStateOf(!isResponse && autoDecryptMatch == null && analysis.classification == PayloadClassification.ENCRYPTED_BLOCK)
+    }
+    var keyInput by remember(rawHex, sessionCryptoState.manualKey) {
+        mutableStateOf(sessionCryptoState.manualKey)
+    }
+    var ivInput by remember(rawHex, sessionCryptoState.manualIv) {
+        mutableStateOf(sessionCryptoState.manualIv)
+    }
+    var keyIsHex by remember(rawHex, sessionCryptoState.manualKeyIsHex) {
+        mutableStateOf(sessionCryptoState.manualKeyIsHex)
+    }
+    var saveForSession by remember(rawHex) { mutableStateOf(true) }
     var mode by remember { mutableStateOf(DecryptMode.AES_CBC_PKCS5) }
     var isDecrypting by remember(rawHex) { mutableStateOf(false) }
     var decryptResult by remember(rawHex) { mutableStateOf<PayloadAnalysis?>(null) }
@@ -737,12 +852,20 @@ fun PayloadDecodedSection(
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f)
                 )
+                if (autoDecryptMatch != null) {
+                    TagChip(text = "AES AUTO", color = EmeraldPulse)
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
                 TagChip(text = analysis.classification.name, color = badgeColor)
             }
 
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = analysis.summary,
+                text = if (autoDecryptMatch != null) {
+                    "${autoDecryptMatch.sourceLabel} (${autoDecryptMatch.mode.label}) • ${analysis.summary}"
+                } else {
+                    analysis.summary
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -840,9 +963,9 @@ fun PayloadDecodedSection(
                 ) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Binary / encrypted payload (${analysis.byteCount} bytes). Open Headers & Hex for raw hex, or decrypt below.",
+                        text = "Encrypted AES payload (${analysis.byteCount}B). Enter your Session Key & IV below to decode into Python Package, or auto-capture /MajorLogin first.",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AmberSignal
                     )
                 }
 
@@ -876,7 +999,7 @@ fun PayloadDecodedSection(
                     ) {
                         HorizontalDivider()
                         Text(
-                            text = "Manual Cipher Decryptor",
+                            text = "AES / Session Key Decryptor",
                             style = MaterialTheme.typography.labelLarge,
                             color = AmberSignal
                         )
@@ -907,7 +1030,7 @@ fun PayloadDecodedSection(
                         OutlinedTextField(
                             value = keyInput,
                             onValueChange = { keyInput = it },
-                            label = { Text(if (keyIsHex) "Key (Hex)" else "Key (UTF-8)") },
+                            label = { Text(if (keyIsHex) "Key (Hex)" else "Key (UTF-8 / 32-Hex)") },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
                             modifier = Modifier.fillMaxWidth()
@@ -927,39 +1050,46 @@ fun PayloadDecodedSection(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text("Key/IV is Hex", style = MaterialTheme.typography.bodySmall)
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                             Switch(checked = keyIsHex, onCheckedChange = { keyIsHex = it })
-                            Spacer(modifier = Modifier.weight(1f))
-                            Button(
-                                enabled = !isDecrypting,
-                                onClick = {
-                                    isDecrypting = true
-                                    decryptScope.launch {
-                                        val res = withContext(Dispatchers.Default) {
-                                            PayloadDecryptor.decrypt(
-                                                payloadHex = rawHex,
-                                                keyInput = keyInput,
-                                                ivInput = ivInput,
-                                                keyIsHex = keyIsHex,
-                                                mode = mode
-                                            )
-                                        }
-                                        res.fold(
-                                            onSuccess = {
-                                                decryptResult = it
-                                                decryptError = null
-                                            },
-                                            onFailure = {
-                                                decryptResult = null
-                                                decryptError = it.message
-                                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("Save Session", style = MaterialTheme.typography.bodySmall)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Switch(checked = saveForSession, onCheckedChange = { saveForSession = it })
+                        }
+                        Button(
+                            enabled = !isDecrypting && keyInput.isNotBlank(),
+                            onClick = {
+                                isDecrypting = true
+                                decryptScope.launch {
+                                    val res = withContext(Dispatchers.Default) {
+                                        PayloadDecryptor.decrypt(
+                                            payloadHex = rawHex,
+                                            keyInput = keyInput,
+                                            ivInput = ivInput,
+                                            keyIsHex = keyIsHex,
+                                            mode = mode
                                         )
-                                        isDecrypting = false
                                     }
+                                    res.fold(
+                                        onSuccess = {
+                                            decryptResult = it
+                                            decryptError = null
+                                            if (saveForSession) {
+                                                onSaveSessionKey(keyInput, ivInput, keyIsHex)
+                                            }
+                                        },
+                                        onFailure = {
+                                            decryptResult = null
+                                            decryptError = it.message
+                                        }
+                                    )
+                                    isDecrypting = false
                                 }
-                            ) {
-                                Text(if (isDecrypting) "Decrypting..." else "Decrypt")
-                            }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (isDecrypting) "Decrypting..." else "Decrypt & Build Package")
                         }
 
                         decryptError?.let { err ->
@@ -981,23 +1111,83 @@ fun PayloadDecodedSection(
                                     )
                                     Spacer(modifier = Modifier.height(6.dp))
                                     dec.protobuf?.let { p ->
-                                        PythonFieldsCodeBlock(
-                                            code = p.fieldsDictFormatted,
-                                            title = "Decrypted Fields {}",
-                                            onCopy = { onCopyToast("Decrypted fields copied") }
-                                        )
+                                        val decPackagePy by produceState(
+                                            initialValue = "",
+                                            key1 = p,
+                                            key2 = endpointPath,
+                                            key3 = isResponse
+                                        ) {
+                                            value = withContext(Dispatchers.Default) {
+                                                ProtobufFieldsFormatter.formatSmartPythonPackage(
+                                                    nodes = p.fields,
+                                                    endpointOrPath = endpointPath,
+                                                    isResponse = isResponse
+                                                )
+                                            }
+                                        }
+                                        val decAsyncSnippet by produceState(
+                                            initialValue = "",
+                                            key1 = p,
+                                            key2 = endpointPath
+                                        ) {
+                                            value = withContext(Dispatchers.Default) {
+                                                ProtobufFieldsFormatter.formatAsyncSnippet(p.fields, endpointPath)
+                                            }
+                                        }
+                                        LazyRow(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            val labels = listOf("Package PY", "JSON", "Fields {}", "async def", "Tree")
+                                            items(labels.size) { idx ->
+                                                FilterChip(
+                                                    selected = decryptedProtoViewMode == idx,
+                                                    onClick = { decryptedProtoViewMode = idx },
+                                                    label = { Text(labels[idx], style = MaterialTheme.typography.labelSmall) }
+                                                )
+                                            }
+                                        }
                                         Spacer(modifier = Modifier.height(6.dp))
-                                        ProtobufTreeView(fields = p.fields)
-                                        Spacer(modifier = Modifier.height(6.dp))
+                                        when (decryptedProtoViewMode) {
+                                            0 -> PythonFieldsCodeBlock(
+                                                code = decPackagePy,
+                                                title = "Decrypted Package (PY)",
+                                                onCopy = { onCopyToast("Decrypted Python package copied") }
+                                            )
+                                            1 -> SyntaxHighlightedJsonBlock(
+                                                json = p.jsonFormatted,
+                                                title = "Decrypted Protobuf JSON",
+                                                onCopy = { onCopyToast("Decrypted JSON copied") }
+                                            )
+                                            2 -> PythonFieldsCodeBlock(
+                                                code = p.fieldsDictFormatted,
+                                                title = "Decrypted Fields {}",
+                                                onCopy = { onCopyToast("Decrypted fields copied") }
+                                            )
+                                            3 -> PythonFieldsCodeBlock(
+                                                code = decAsyncSnippet,
+                                                title = "Async Packet Builder Snippet",
+                                                onCopy = { onCopyToast("Async snippet copied") }
+                                            )
+                                            else -> ProtobufTreeView(fields = p.fields)
+                                        }
                                     }
                                     if (dec.protobuf == null) {
-                                        val fallback = dec.formattedJson ?: dec.utf8Text ?: dec.hex.ifBlank { "<Empty Body>" }
-                                        SelectionContainer {
-                                            Text(
-                                                text = fallback,
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.onSurface
+                                        if (dec.formattedJson != null) {
+                                            SyntaxHighlightedJsonBlock(
+                                                json = dec.formattedJson,
+                                                title = "Decrypted JSON",
+                                                onCopy = { onCopyToast("Decrypted JSON copied") }
                                             )
+                                        } else {
+                                            val fallback = dec.utf8Text ?: dec.hex.ifBlank { "<Empty Body>" }
+                                            SelectionContainer {
+                                                Text(
+                                                    text = fallback,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                            }
                                         }
                                     }
                                 }

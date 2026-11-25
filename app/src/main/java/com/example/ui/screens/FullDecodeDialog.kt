@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,8 +26,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -47,15 +50,29 @@ import com.example.ui.theme.CoralAlert
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.viewmodel.FullDecodeUiState
+import com.example.ui.viewmodel.SessionCryptoUiState
 
 @Composable
 fun FullDecodeDialog(
     state: FullDecodeUiState,
-    onSelectAndRun: (FullDecodeScope) -> Unit,
+    sessionCryptoState: SessionCryptoUiState = SessionCryptoUiState(),
+    onSelectAndRun: (FullDecodeScope, String, String, Boolean) -> Unit,
     onSharePackage: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var chosenScope by remember(state.isDialogOpen) { mutableStateOf(state.selectedScope) }
+    var showCryptoInputs by remember(state.isDialogOpen) {
+        mutableStateOf(sessionCryptoState.manualKey.isNotBlank())
+    }
+    var manualKey by remember(state.isDialogOpen, sessionCryptoState.manualKey) {
+        mutableStateOf(sessionCryptoState.manualKey)
+    }
+    var manualIv by remember(state.isDialogOpen, sessionCryptoState.manualIv) {
+        mutableStateOf(sessionCryptoState.manualIv)
+    }
+    var keyIsHex by remember(state.isDialogOpen, sessionCryptoState.manualKeyIsHex) {
+        mutableStateOf(sessionCryptoState.manualKeyIsHex)
+    }
 
     AlertDialog(
         onDismissRequest = {
@@ -81,7 +98,9 @@ fun FullDecodeDialog(
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
             ) {
                 when {
                     state.isRunning -> {
@@ -168,7 +187,7 @@ fun FullDecodeDialog(
 
                     else -> {
                         Text(
-                            text = "Batch-decode captured payloads into Pro Python Packages inside Documents/Aryan. Each entry cleanly separates Full URL, Request Hex, Response Hex, and auto-built Python code (build_login_payload / endpoint(K, V) -> iZ).",
+                            text = "Batch-decode captured payloads into Pro Python Packages inside Documents/Aryan. Auto-extracts session AES keys from /MajorLogin & /GetLoginData when captured.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -224,6 +243,53 @@ fun FullDecodeDialog(
                             }
                         }
 
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showCryptoInputs = !showCryptoInputs }
+                                .padding(top = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = AppIcons.Key,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (showCryptoInputs) "Hide Session AES Key / IV" else "Optional: Session AES Key / IV",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        AnimatedVisibility(visible = showCryptoInputs) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                OutlinedTextField(
+                                    value = manualKey,
+                                    onValueChange = { manualKey = it },
+                                    label = { Text(if (keyIsHex) "AES Key (Hex)" else "AES Key (UTF-8 / 32-Hex)") },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                OutlinedTextField(
+                                    value = manualIv,
+                                    onValueChange = { manualIv = it },
+                                    label = { Text("AES IV (16B, blank = Zero IV)") },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Hex Key/IV", style = MaterialTheme.typography.labelSmall)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Switch(checked = keyIsHex, onCheckedChange = { keyIsHex = it })
+                                }
+                            }
+                        }
+
                         state.error?.let { err ->
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
@@ -259,7 +325,7 @@ fun FullDecodeDialog(
                 }
                 else -> {
                     Button(
-                        onClick = { onSelectAndRun(chosenScope) },
+                        onClick = { onSelectAndRun(chosenScope, manualKey, manualIv, keyIsHex) },
                         modifier = Modifier.testTag("full_decode_start_button")
                     ) {
                         Icon(AppIcons.AutoFixHigh, contentDescription = null, modifier = Modifier.size(16.dp))

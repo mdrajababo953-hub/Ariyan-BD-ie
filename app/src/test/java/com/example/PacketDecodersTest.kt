@@ -492,4 +492,75 @@ class PacketDecodersTest {
         assertTrue(mgr.isCaReady())
         assertTrue(mgr.getCaPemString().contains("BEGIN CERTIFICATE"))
     }
+
+    @Test
+    fun `session crypto resolver extracts key and iv from login response and auto-decrypts PurchaseGacha request`() {
+        // 16-byte session key & iv embedded in /MajorLogin response protobuf fields 22 & 23
+        val aesKey = "0123456789abcdef".toByteArray(Charsets.UTF_8)
+        val aesIv = "fedcba9876543210".toByteArray(Charsets.UTF_8)
+        fun pbBytes(fieldNum: Int, data: ByteArray): ByteArray {
+            val tag = (fieldNum shl 3) or 2
+            val out = java.io.ByteArrayOutputStream()
+            fun writeVarint(v: Int) {
+                var x = v
+                while ((x and 0x7F.inv()) != 0) {
+                    out.write((x and 0x7F) or 0x80)
+                    x = x ushr 7
+                }
+                out.write(x)
+            }
+            writeVarint(tag)
+            writeVarint(data.size)
+            out.write(data)
+            return out.toByteArray()
+        }
+        val loginRespBytes = byteArrayOf(0x08, 0x01) + pbBytes(22, aesKey) + pbBytes(23, aesIv)
+        val loginPacket = com.example.data.db.CapturedPacketEntity(
+            id = 1, sessionId = 1, timestamp = 1000L, method = "POST",
+            url = "https://client.ind.freefiremobile.com/MajorLogin",
+            host = "client.ind.freefiremobile.com", path = "/MajorLogin", port = 443,
+            protocol = "HTTPS", statusCode = 200, requestHeadersJson = "{}",
+            requestBodyHex = "", responseHeadersJson = "{}",
+            responseBodyHex = HexUtils.bytesToHex(loginRespBytes),
+            durationMs = 5, bytesTx = 0, bytesRx = loginRespBytes.size,
+            isBlocked = false, blockReason = null
+        )
+
+        // Plaintext PurchaseGacha protobuf: field 1 = 1001, field 2 = 1 -> AES-CBC PKCS5 encrypts to 16 bytes
+        val gachaPlain = byteArrayOf(0x08, 0xE9.toByte(), 0x07, 0x10, 0x01)
+        val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(
+            javax.crypto.Cipher.ENCRYPT_MODE,
+            javax.crypto.spec.SecretKeySpec(aesKey, "AES"),
+            javax.crypto.spec.IvParameterSpec(aesIv)
+        )
+        val gachaEncryptedHex = HexUtils.bytesToHex(cipher.doFinal(gachaPlain))
+        assertEquals(32, gachaEncryptedHex.length)
+
+        val gachaPacket = loginPacket.copy(
+            id = 2,
+            timestamp = 2000L,
+            url = "https://client.ind.freefiremobile.com/PurchaseGacha",
+            path = "/PurchaseGacha",
+            requestBodyHex = gachaEncryptedHex,
+            responseBodyHex = "0a0a080110d983fcfd021802"
+        )
+
+        val candidates = com.example.decoder.SessionCryptoResolver.buildCandidateKeyIvPairs(
+            sessionPackets = listOf(loginPacket, gachaPacket)
+        )
+        val match = com.example.decoder.SessionCryptoResolver.tryAutoDecrypt(gachaEncryptedHex, candidates)
+        assertNotNull(match)
+        assertEquals(PayloadClassification.PROTOBUF, match!!.analysis.classification)
+
+        val reqPkg = com.example.decoder.BatchDecodeExporter.formatRequestPackageOnly(
+            pkt = gachaPacket,
+            keyCandidates = candidates
+        )
+        assertTrue(reqPkg.contains("https://client.ind.freefiremobile.com/PurchaseGacha"))
+        assertTrue(reqPkg.contains("def purchase_gacha(K, V):"))
+        assertTrue(reqPkg.contains("fields[1] = 1001"))
+        assertTrue(reqPkg.contains("fields[2] = 1"))
+        assertTrue(reqPkg.contains("return iZ(str(gZ(fields).hex()), packet_id, K, V)"))
+    }
 }

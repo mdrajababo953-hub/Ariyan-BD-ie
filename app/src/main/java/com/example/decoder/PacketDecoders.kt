@@ -916,6 +916,15 @@ object SessionCryptoResolver {
                             found.add(HexUtils.hexToBytes(str))
                         }
                     }
+                    if (len in 22..44) {
+                        val str = runCatching { String(slice, Charsets.UTF_8) }.getOrNull()
+                        if (str != null && str.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it in "+/=_-" }) {
+                            val b64 = runCatching { Base64.decode(str, Base64.DEFAULT) }.getOrNull()
+                            if (b64 != null && b64.size in listOf(16, 24, 32)) {
+                                found.add(b64)
+                            }
+                        }
+                    }
                     if (len >= 6 && depth < 4) {
                         found.addAll(extractCryptoSlicesFromBytes(slice, depth + 1))
                     }

@@ -165,15 +165,15 @@ fun PacketRowCard(
     modifier: Modifier = Modifier
 ) {
     val haptic = LocalHapticFeedback.current
-    val respClassification by produceState(
+    val primaryClassification by produceState(
         initialValue = PayloadClassification.EMPTY,
-        key1 = packet.responseBodyHex,
-        key2 = packet.requestBodyHex
+        key1 = packet.requestBodyHex,
+        key2 = packet.responseBodyHex
     ) {
         value = withContext(Dispatchers.Default) {
             when {
-                packet.responseBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.responseBodyHex)
                 packet.requestBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.requestBodyHex)
+                packet.responseBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.responseBodyHex)
                 else -> PayloadClassification.EMPTY
             }
         }
@@ -235,13 +235,13 @@ fun PacketRowCard(
                     )
                 }
 
-                if (respClassification == PayloadClassification.PROTOBUF) {
+                if (primaryClassification == PayloadClassification.PROTOBUF) {
                     TagChip(
                         text = "PROTO",
                         color = VioletProto,
                         icon = AppIcons.DataObject
                     )
-                } else if (respClassification == PayloadClassification.ENCRYPTED_BLOCK) {
+                } else if (primaryClassification == PayloadClassification.ENCRYPTED_BLOCK) {
                     TagChip(
                         text = "16B ENC",
                         color = AmberSignal

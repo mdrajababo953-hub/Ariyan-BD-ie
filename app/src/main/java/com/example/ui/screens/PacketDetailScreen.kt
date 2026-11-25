@@ -380,7 +380,6 @@ private fun DecodeTabContent(
     onSendToDecoderLab: (String) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
-    var showManualResponseDecode by remember(packet.id) { mutableStateOf(false) }
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
@@ -389,10 +388,10 @@ private fun DecodeTabContent(
             .fillMaxSize()
             .testTag("decode_request_response_switch")
     ) {
-        // 1. First & foremost: Request Body decoded into its Python Package
+        // 1. First & foremost: Decode Request -> Python Package
         item {
             PayloadDecodedSection(
-                title = "Request Package",
+                title = "Decode Request",
                 endpointPath = packet.path,
                 isResponse = false,
                 analysis = reqAnalysis,
@@ -446,94 +445,19 @@ private fun DecodeTabContent(
             }
         }
 
-        // 3. Raw Body Hex overview (Request & Response Hex)
+        // 3. Raw Body Hex overview (Request Hex & Response Hex — send Response to Decoder Lab anytime)
         item {
             DualBodyHexOverviewCard(
                 requestHex = packet.requestBodyHex,
                 responseHex = packet.responseBodyHex,
                 showRequest = true,
                 showResponse = true,
+                onOpenInLab = onSendToDecoderLab,
                 onCopyToast = onCopyToast
             )
         }
 
-        // 4. Response Body: Manual Decode Only (never auto-decoded upfront)
-        item {
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Response Body (Manual Decode)",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "${respAnalysis.byteCount}B • ${respAnalysis.classification.name} — tap to decode manually",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        TagChip(
-                            text = if (showManualResponseDecode) "SHOWN" else "MANUAL",
-                            color = if (showManualResponseDecode) EmeraldPulse else MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        OutlinedButton(
-                            onClick = { showManualResponseDecode = !showManualResponseDecode },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("decode_manual_response_button")
-                        ) {
-                            Icon(AppIcons.DataObject, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (showManualResponseDecode) "Hide Response" else "Decode Response")
-                        }
-                        OutlinedButton(
-                            onClick = { onSendToDecoderLab(packet.responseBodyHex) },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("decode_response_lab_button")
-                        ) {
-                            Icon(AppIcons.Code, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Open in Lab")
-                        }
-                    }
-
-                    AnimatedVisibility(visible = showManualResponseDecode) {
-                        Column(modifier = Modifier.padding(top = 12.dp)) {
-                            PayloadDecodedSection(
-                                title = "Response Package",
-                                endpointPath = packet.path,
-                                isResponse = true,
-                                analysis = respAnalysis,
-                                rawHex = packet.responseBodyHex,
-                                sessionCryptoState = sessionCryptoState,
-                                onSaveSessionKey = onSaveSessionKey,
-                                onCopyToast = onCopyToast,
-                                onSendToDecoderLab = onSendToDecoderLab
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 5. JWT Claims (if Authorization Bearer JWT is present)
+        // 4. JWT Claims (if Authorization Bearer JWT is present)
         if (jwtDecoded != null) {
             item {
                 JwtDecodedCard(jwt = jwtDecoded, onCopyToast = onCopyToast)
@@ -548,6 +472,7 @@ private fun DualBodyHexOverviewCard(
     responseHex: String,
     showRequest: Boolean,
     showResponse: Boolean,
+    onOpenInLab: ((String) -> Unit)? = null,
     onCopyToast: (String) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
@@ -593,6 +518,9 @@ private fun DualBodyHexOverviewCard(
                             onCopy = {
                                 clipboard.setText(AnnotatedString(cleanReq))
                                 onCopyToast("Request Hex copied")
+                            },
+                            onOpenInLab = onOpenInLab?.let { open ->
+                                if (cleanReq.isNotBlank()) ({ open(requestHex) }) else null
                             }
                         )
                     }
@@ -603,6 +531,9 @@ private fun DualBodyHexOverviewCard(
                             onCopy = {
                                 clipboard.setText(AnnotatedString(cleanResp))
                                 onCopyToast("Response Hex copied")
+                            },
+                            onOpenInLab = onOpenInLab?.let { open ->
+                                if (cleanResp.isNotBlank()) ({ open(responseHex) }) else null
                             }
                         )
                     }
@@ -616,7 +547,8 @@ private fun DualBodyHexOverviewCard(
 private fun CompactHexStrip(
     label: String,
     hex: String,
-    onCopy: () -> Unit
+    onCopy: () -> Unit,
+    onOpenInLab: (() -> Unit)? = null
 ) {
     Surface(
         shape = RoundedCornerShape(10.dp),
@@ -636,6 +568,16 @@ private fun CompactHexStrip(
                     modifier = Modifier.weight(1f)
                 )
                 if (hex.isNotBlank()) {
+                    if (onOpenInLab != null) {
+                        IconButton(onClick = onOpenInLab, modifier = Modifier.size(30.dp)) {
+                            Icon(
+                                AppIcons.Code,
+                                contentDescription = "Open in Decoder Lab",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                    }
                     IconButton(onClick = onCopy, modifier = Modifier.size(30.dp)) {
                         Icon(
                             AppIcons.ContentCopy,
@@ -999,7 +941,7 @@ fun PayloadDecodedSection(
                     ) {
                         HorizontalDivider()
                         Text(
-                            text = "AES / Session Key Decryptor",
+                            text = if (isResponse) "AES / Session Key Decryptor" else "Decode Request (AES / Session Key)",
                             style = MaterialTheme.typography.labelLarge,
                             color = AmberSignal
                         )
@@ -1087,9 +1029,11 @@ fun PayloadDecodedSection(
                                     isDecrypting = false
                                 }
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("decode_request_decrypt_button")
                         ) {
-                            Text(if (isDecrypting) "Decrypting..." else "Decrypt & Build Package")
+                            Text(if (isDecrypting) "Decoding..." else if (isResponse) "Decode Payload" else "Decode Request")
                         }
 
                         decryptError?.let { err ->

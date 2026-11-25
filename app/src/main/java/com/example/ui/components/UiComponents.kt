@@ -167,14 +167,13 @@ fun PacketRowCard(
     val haptic = LocalHapticFeedback.current
     val primaryClassification by produceState(
         initialValue = PayloadClassification.EMPTY,
-        key1 = packet.requestBodyHex,
-        key2 = packet.responseBodyHex
+        key1 = packet.requestBodyHex
     ) {
         value = withContext(Dispatchers.Default) {
-            when {
-                packet.requestBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.requestBodyHex)
-                packet.responseBodyHex.isNotEmpty() -> PayloadAnalyzer.quickClassify(packet.responseBodyHex)
-                else -> PayloadClassification.EMPTY
+            if (packet.requestBodyHex.isNotEmpty()) {
+                PayloadAnalyzer.quickClassify(packet.requestBodyHex)
+            } else {
+                PayloadClassification.EMPTY
             }
         }
     }

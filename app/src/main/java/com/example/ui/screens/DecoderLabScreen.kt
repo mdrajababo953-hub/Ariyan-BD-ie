@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.decoder.DecryptMode
@@ -57,11 +58,14 @@ private const val PRESET_JWT =
 fun DecoderLabScreen(
     state: DecoderLabState,
     onInputChange: (String) -> Unit,
+    onDecodeClick: () -> Unit,
+    onPresetClick: (String) -> Unit,
     onHeaderSkipChange: (Int) -> Unit,
     onUpdateCrypto: (key: String, iv: String, keyIsHex: Boolean, mode: DecryptMode) -> Unit,
     onRunDecrypt: () -> Unit,
     onCopyToast: (String) -> Unit
 ) {
+    val clipboard = LocalClipboardManager.current
     var protoViewMode by remember { mutableIntStateOf(0) }
     var decryptedViewMode by remember { mutableIntStateOf(0) }
 
@@ -77,7 +81,7 @@ fun DecoderLabScreen(
                     style = MaterialTheme.typography.headlineSmall
                 )
                 Text(
-                    text = "Decode Protobuf Hex to fields = { ... }, async def snippets, JWT & AES/XOR payloads",
+                    text = "Paste Response or Request Hex, JWT, or JSON below and tap Decode to build Python Package & Fields",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -87,17 +91,17 @@ fun DecoderLabScreen(
         item {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 item {
-                    OutlinedButton(onClick = { onInputChange(PRESET_CS_RANKING) }) {
+                    OutlinedButton(onClick = { onPresetClick(PRESET_CS_RANKING) }) {
                         Text("CS Ranking Hex")
                     }
                 }
                 item {
-                    OutlinedButton(onClick = { onInputChange(PRESET_LEVEL_REWARDS) }) {
+                    OutlinedButton(onClick = { onPresetClick(PRESET_LEVEL_REWARDS) }) {
                         Text("Level Rewards Hex")
                     }
                 }
                 item {
-                    OutlinedButton(onClick = { onInputChange(PRESET_JWT) }) {
+                    OutlinedButton(onClick = { onPresetClick(PRESET_JWT) }) {
                         Text("Sample JWT")
                     }
                 }
@@ -105,18 +109,56 @@ fun DecoderLabScreen(
         }
 
         item {
-            OutlinedTextField(
-                value = state.inputText,
-                onValueChange = onInputChange,
-                label = { Text("Paste Hex, JWT Token, or JSON") },
-                minLines = 3,
-                maxLines = 6,
-                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("decoder_lab_input")
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = state.inputText,
+                    onValueChange = onInputChange,
+                    label = { Text("Paste Response / Request Hex, JWT Token, or JSON") },
+                    minLines = 3,
+                    maxLines = 6,
+                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("decoder_lab_input")
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val clipText = clipboard.getText()?.text.orEmpty()
+                            if (clipText.isNotBlank()) {
+                                onInputChange(clipText)
+                                onCopyToast("Hex pasted — tap Decode")
+                            } else {
+                                onCopyToast("Clipboard is empty")
+                            }
+                        },
+                        modifier = Modifier.testTag("decoder_lab_paste_button")
+                    ) {
+                        Text("Paste")
+                    }
+                    OutlinedButton(
+                        onClick = { onInputChange("") },
+                        enabled = state.inputText.isNotEmpty(),
+                        modifier = Modifier.testTag("decoder_lab_clear_button")
+                    ) {
+                        Text("Clear")
+                    }
+                    Button(
+                        onClick = onDecodeClick,
+                        enabled = state.inputText.isNotBlank(),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("decoder_lab_decode_button")
+                    ) {
+                        Text("Decode")
+                    }
+                }
+            }
         }
 
         if (state.jwtResult == null) {

@@ -669,294 +669,6 @@ object PayloadDecryptor {
     }
 }
 
-data class SessionKeyIv(
-    val key: ByteArray,
-    val iv: ByteArray,
-    val sourceLabel: String
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is SessionKeyIv) return false
-        return key.contentEquals(other.key) && iv.contentEquals(other.iv) && sourceLabel == other.sourceLabel
-    }
-
-    override fun hashCode(): Int {
-        var result = key.contentHashCode()
-        result = 31 * result + iv.contentHashCode()
-        result = 31 * result + sourceLabel.hashCode()
-        return result
-    }
-}
-
-data class AutoDecryptMatch(
-    val analysis: PayloadAnalysis,
-    val mode: DecryptMode,
-    val keyHex: String,
-    val ivHex: String,
-    val sourceLabel: String
-)
-
-object SessionCryptoResolver {
-
-    fun parseKeyOrIvBytes(input: String, preferHex: Boolean): List<ByteArray> {
-        val trimmed = input.trim()
-        if (trimmed.isEmpty()) return emptyList()
-        val results = mutableListOf<ByteArray>()
-        if (preferHex) {
-            val hex = HexUtils.hexToBytes(trimmed)
-            if (hex.isNotEmpty()) results.add(hex)
-            val utf8 = trimmed.toByteArray(Charsets.UTF_8)
-            if (utf8.size in listOf(16, 24, 32) && !utf8.contentEquals(hex)) {
-                results.add(utf8)
-            }
-        } else {
-            val utf8 = trimmed.toByteArray(Charsets.UTF_8)
-            if (utf8.isNotEmpty()) results.add(utf8)
-            val clean = HexUtils.sanitizeHex(trimmed)
-            if (clean.length in listOf(32, 48, 64) && clean.length == trimmed.replace(" ", "").length) {
-                val hex = HexUtils.hexToBytes(clean)
-                if (hex.isNotEmpty() && !hex.contentEquals(utf8)) {
-                    results.add(hex)
-                }
-            }
-        }
-        return results
-    }
-
-    fun buildCandidateKeyIvPairs(
-        sessionPackets: List<CapturedPacketEntity>,
-        manualKey: String = "",
-        manualIv: String = "",
-        manualIsHex: Boolean = false
-    ): List<SessionKeyIv> {
-        val candidates = mutableListOf<SessionKeyIv>()
-        val seen = HashSet<String>()
-
-        fun addCandidate(key: ByteArray, iv: ByteArray, label: String) {
-            if (key.size !in listOf(16, 24, 32) || iv.size != 16) return
-            val sig = "${HexUtils.bytesToHex(key)}:${HexUtils.bytesToHex(iv)}"
-            if (seen.add(sig)) {
-                candidates.add(SessionKeyIv(key = key, iv = iv, sourceLabel = label))
-            }
-        }
-
-        // 1. User-supplied Session Key & IV take highest priority
-        val manualKeys = parseKeyOrIvBytes(manualKey, manualIsHex).filter { it.size in listOf(16, 24, 32) }
-        val manualIvs = if (manualIv.isBlank()) {
-            listOf(ByteArray(16))
-        } else {
-            parseKeyOrIvBytes(manualIv, manualIsHex).filter { it.size == 16 }
-        }
-        for (k in manualKeys) {
-            for (iv in manualIvs) {
-                addCandidate(k, iv, "Session Key")
-            }
-            if (manualIv.isNotBlank()) {
-                addCandidate(k, ByteArray(16), "Session Key (Zero IV)")
-            }
-        }
-
-        // 2. Auto-extract 16-byte / 32-byte key & IV candidates from Login/Auth responses in the session
-        val loginPackets = sessionPackets.filter { pkt ->
-            val target = "${pkt.path} ${pkt.url}".lowercase(Locale.US)
-            target.contains("getlogindata") ||
-                target.contains("majorlogin") ||
-                target.contains("login") ||
-                target.contains("auth")
-        }.sortedByDescending { it.timestamp }
-
-        for (pkt in loginPackets) {
-            if (pkt.responseBodyHex.isBlank()) continue
-            val bytes = HexUtils.hexToBytes(pkt.responseBodyHex)
-            if (bytes.isEmpty()) continue
-            val chunks = extractCryptoSlicesFromBytes(bytes)
-            val labelPrefix = pkt.path.substringAfterLast("/").ifBlank { "Login" }
-            if (chunks.size >= 2) {
-                for (i in 0 until chunks.size - 1) {
-                    val a = chunks[i]
-                    val b = chunks[i + 1]
-                    if (b.size == 16) addCandidate(a, b, "$labelPrefix Auto")
-                    if (a.size == 16) addCandidate(b, a, "$labelPrefix Auto")
-                    if (candidates.size >= 48) break
-                }
-            }
-            for (chunk in chunks) {
-                if (candidates.size >= 56) break
-                addCandidate(chunk, ByteArray(16), "$labelPrefix Zero-IV")
-            }
-            if (candidates.size >= 56) break
-        }
-
-        return candidates
-    }
-
-    fun tryAutoDecrypt(
-        hexInput: String,
-        candidates: List<SessionKeyIv>
-    ): AutoDecryptMatch? {
-        if (candidates.isEmpty() || hexInput.isBlank()) return null
-        val cleanHex = HexUtils.sanitizeHex(hexInput)
-        if (cleanHex.length < 32) return null
-        val cipherBytes = HexUtils.hexToBytes(cleanHex)
-        if (cipherBytes.size < 16 || cipherBytes.size % 16 != 0) return null
-
-        // Never overwrite payloads that already decode cleanly without decryption
-        if (PayloadAnalyzer.quickClassify(cleanHex) != PayloadClassification.ENCRYPTED_BLOCK) {
-            return null
-        }
-
-        // Pass 1: AES-CBC with PKCS5/PKCS7 padding (standard Python / Free Fire enc())
-        for (cand in candidates) {
-            val plain = runCatching {
-                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(cand.key, "AES"), IvParameterSpec(cand.iv))
-                cipher.doFinal(cipherBytes)
-            }.getOrNull() ?: continue
-
-            if (plain.isNotEmpty()) {
-                val analysis = PayloadAnalyzer.analyze(HexUtils.bytesToHex(plain))
-                if (isHighConfidenceDecrypted(analysis)) {
-                    return AutoDecryptMatch(
-                        analysis = analysis,
-                        mode = DecryptMode.AES_CBC_PKCS5,
-                        keyHex = HexUtils.bytesToHex(cand.key),
-                        ivHex = HexUtils.bytesToHex(cand.iv),
-                        sourceLabel = cand.sourceLabel
-                    )
-                }
-            }
-        }
-
-        // Pass 2: AES-CBC NoPadding fallback (only accept clean structured Protobuf or JSON)
-        for (cand in candidates) {
-            val plain = runCatching {
-                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(cand.key, "AES"), IvParameterSpec(cand.iv))
-                cipher.doFinal(cipherBytes)
-            }.getOrNull() ?: continue
-
-            if (plain.isNotEmpty()) {
-                val analysis = PayloadAnalyzer.analyze(HexUtils.bytesToHex(plain))
-                if (isHighConfidenceDecrypted(analysis, strict = true)) {
-                    return AutoDecryptMatch(
-                        analysis = analysis,
-                        mode = DecryptMode.AES_CBC_NOPAD,
-                        keyHex = HexUtils.bytesToHex(cand.key),
-                        ivHex = HexUtils.bytesToHex(cand.iv),
-                        sourceLabel = cand.sourceLabel
-                    )
-                }
-            }
-        }
-
-        return null
-    }
-
-    fun analyzeWithAutoDecrypt(
-        hexInput: String,
-        candidates: List<SessionKeyIv>
-    ): Pair<PayloadAnalysis, AutoDecryptMatch?> {
-        val auto = tryAutoDecrypt(hexInput, candidates)
-        return if (auto != null) {
-            auto.analysis to auto
-        } else {
-            PayloadAnalyzer.analyze(hexInput) to null
-        }
-    }
-
-    private fun isHighConfidenceDecrypted(
-        analysis: PayloadAnalysis,
-        strict: Boolean = false
-    ): Boolean {
-        if (analysis.classification == PayloadClassification.JSON) return true
-        val proto = analysis.protobuf ?: return false
-        if (proto.fields.isEmpty()) return false
-        val maxReasonableField = if (strict) 120 else 500
-        if (!proto.fields.all { it.fieldNumber in 1..maxReasonableField }) return false
-        if (strict && proto.fields.size == 1 && !proto.fields.first().wireTypeName.startsWith("STRING")) {
-            return false
-        }
-        return true
-    }
-
-    private fun extractCryptoSlicesFromBytes(bytes: ByteArray, depth: Int = 0): List<ByteArray> {
-        if (bytes.isEmpty() || depth > 4) return emptyList()
-        val found = mutableListOf<ByteArray>()
-        var idx = 0
-        while (idx < bytes.size) {
-            val tagRes = readVarint(bytes, idx, 5) ?: break
-            val tag = tagRes.first
-            idx = tagRes.second
-            if (tag <= 0L) break
-            val fieldNum = (tag ushr 3).toInt()
-            val wireType = (tag and 0x07).toInt()
-            if (fieldNum <= 0 || fieldNum > 100_000) break
-            when (wireType) {
-                0 -> {
-                    val v = readVarint(bytes, idx, 10) ?: break
-                    idx = v.second
-                }
-                1 -> {
-                    if (idx + 8 > bytes.size) return found
-                    idx += 8
-                }
-                2 -> {
-                    val lenRes = readVarint(bytes, idx, 5) ?: break
-                    val len = lenRes.first.toInt()
-                    idx = lenRes.second
-                    if (len < 0 || len > bytes.size - idx) break
-                    val slice = bytes.copyOfRange(idx, idx + len)
-                    idx += len
-                    if (len == 16 || len == 24 || len == 32) {
-                        found.add(slice)
-                    }
-                    if (len == 32) {
-                        val str = runCatching { String(slice, Charsets.UTF_8) }.getOrNull()
-                        if (str != null && str.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
-                            found.add(HexUtils.hexToBytes(str))
-                        }
-                    }
-                    if (len in 22..44) {
-                        val str = runCatching { String(slice, Charsets.UTF_8) }.getOrNull()
-                        if (str != null && str.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it in "+/=_-" }) {
-                            val b64 = runCatching { Base64.decode(str, Base64.DEFAULT) }.getOrNull()
-                            if (b64 != null && b64.size in listOf(16, 24, 32)) {
-                                found.add(b64)
-                            }
-                        }
-                    }
-                    if (len >= 6 && depth < 4) {
-                        found.addAll(extractCryptoSlicesFromBytes(slice, depth + 1))
-                    }
-                }
-                5 -> {
-                    if (idx + 4 > bytes.size) return found
-                    idx += 4
-                }
-                else -> return found
-            }
-            if (found.size >= 40) break
-        }
-        return found
-    }
-
-    private fun readVarint(bytes: ByteArray, start: Int, maxBytes: Int): Pair<Long, Int>? {
-        var result = 0L
-        var shift = 0
-        var i = start
-        var count = 0
-        while (i < bytes.size && shift <= 63 && count < maxBytes) {
-            val b = bytes[i].toInt() and 0xFF
-            result = result or ((b.toLong() and 0x7FL) shl shift)
-            i++
-            count++
-            if ((b and 0x80) == 0) return result to i
-            shift += 7
-        }
-        return null
-    }
-}
-
 object PacketJsonSerializer {
     fun parseHeadersMap(headersJson: String): Map<String, String> {
         val result = linkedMapOf<String, String>()
@@ -972,10 +684,10 @@ object PacketJsonSerializer {
         return result
     }
 
-    fun decodePayloadValue(hex: String, keyCandidates: List<SessionKeyIv> = emptyList()): Any {
+    fun decodePayloadValue(hex: String): Any {
         val cleanHex = HexUtils.sanitizeHex(hex)
         if (cleanHex.length < 2) return JSONObject.NULL
-        val (analysis, _) = SessionCryptoResolver.analyzeWithAutoDecrypt(cleanHex, keyCandidates)
+        val analysis = PayloadAnalyzer.analyze(cleanHex)
         return when {
             analysis.protobuf != null -> JSONObject(analysis.protobuf.jsonFormatted)
             analysis.formattedJson != null -> {
@@ -989,10 +701,10 @@ object PacketJsonSerializer {
         }
     }
 
-    fun decodePayloadFormattedText(hex: String, keyCandidates: List<SessionKeyIv> = emptyList()): String? {
+    fun decodePayloadFormattedText(hex: String): String? {
         val cleanHex = HexUtils.sanitizeHex(hex)
         if (cleanHex.length < 2) return null
-        val (analysis, _) = SessionCryptoResolver.analyzeWithAutoDecrypt(cleanHex, keyCandidates)
+        val analysis = PayloadAnalyzer.analyze(cleanHex)
         return when {
             analysis.protobuf != null -> analysis.protobuf.jsonFormatted
             analysis.formattedJson != null -> analysis.formattedJson
@@ -1001,10 +713,7 @@ object PacketJsonSerializer {
         }
     }
 
-    fun packetToJsonObject(
-        packet: CapturedPacketEntity,
-        keyCandidates: List<SessionKeyIv> = emptyList()
-    ): JSONObject {
+    fun packetToJsonObject(packet: CapturedPacketEntity): JSONObject {
         val apiEndpoint = if (packet.method.isNotBlank() && packet.url.isNotBlank()) {
             "${packet.method} ${packet.url}"
         } else {
@@ -1012,25 +721,20 @@ object PacketJsonSerializer {
         }
         return JSONObject().apply {
             put("api", apiEndpoint)
-            put("request", decodePayloadValue(packet.requestBodyHex, keyCandidates))
-            put("response", decodePayloadValue(packet.responseBodyHex, keyCandidates))
+            put("request", decodePayloadValue(packet.requestBodyHex))
         }
     }
 
-    fun packetToFormattedJson(
-        packet: CapturedPacketEntity,
-        keyCandidates: List<SessionKeyIv> = emptyList()
-    ): String {
-        return packetToJsonObject(packet, keyCandidates).toString(2)
+    fun packetToFormattedJson(packet: CapturedPacketEntity): String {
+        return packetToJsonObject(packet).toString(2)
     }
 
     fun sessionToFormattedJson(
         session: CaptureSessionEntity,
         packets: List<CapturedPacketEntity>
     ): String {
-        val candidates = SessionCryptoResolver.buildCandidateKeyIvPairs(packets)
         val arr = JSONArray()
-        packets.forEach { arr.put(packetToJsonObject(it, candidates)) }
+        packets.forEach { arr.put(packetToJsonObject(it)) }
         return arr.toString(2)
     }
 }
@@ -1077,6 +781,46 @@ object ProtobufFieldsFormatter {
             .ifBlank { "Packet" }
         val fnEndpoint = if (isResponse) "${cleanTarget}_response" else cleanTarget
         return formatEndpointPackagePython(nodes, fnEndpoint, packetHeaderHex)
+    }
+
+    fun formatFallbackRequestPackage(
+        analysis: PayloadAnalysis,
+        endpointOrPath: String,
+        packetHeaderHex: String = "0E15"
+    ): String {
+        val proto = analysis.protobuf
+        if (proto != null) {
+            return formatSmartPythonPackage(
+                nodes = proto.fields,
+                endpointOrPath = endpointOrPath,
+                isResponse = false,
+                packetHeaderHex = packetHeaderHex
+            )
+        }
+        val fnName = toSnakeCaseEndpoint(endpointOrPath)
+        return buildString {
+            appendLine("def $fnName(K, V):")
+            appendLine("    packet_id = '$packetHeaderHex'")
+            when {
+                analysis.formattedJson != null -> {
+                    appendLine("    payload = ${analysis.formattedJson.replace("\n", "\n    ")}")
+                    append("    return payload")
+                }
+                analysis.classification == PayloadClassification.TEXT && analysis.utf8Text != null -> {
+                    appendLine("    payload = \"${escapePythonStr(analysis.utf8Text)}\"")
+                    append("    return payload")
+                }
+                analysis.classification == PayloadClassification.EMPTY -> {
+                    appendLine("    fields = {}")
+                    append("    return iZ(str(gZ(fields).hex()), packet_id, K, V)")
+                }
+                else -> {
+                    appendLine("    # Encrypted / Binary Request Body (${analysis.byteCount}B)")
+                    appendLine("    raw_hex = \"${analysis.hex}\"")
+                    append("    return raw_hex")
+                }
+            }
+        }
     }
 
     fun isCleanPackageProtobuf(nodes: List<ProtobufFieldNode>, endpointOrPath: String = ""): Boolean {

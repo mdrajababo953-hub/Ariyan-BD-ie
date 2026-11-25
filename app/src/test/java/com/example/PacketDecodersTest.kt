@@ -176,12 +176,12 @@ class PacketDecodersTest {
             protocol = "HTTPS",
             statusCode = 200,
             requestHeadersJson = "{}",
-            requestBodyHex = "1a725b2c56ec52ba7d09623454c0a003",
+            requestBodyHex = "0a00",
             responseHeadersJson = "{}",
-            responseBodyHex = "0a00",
+            responseBodyHex = "08f4f3c8cf3d",
             durationMs = 10,
-            bytesTx = 16,
-            bytesRx = 2,
+            bytesTx = 2,
+            bytesRx = 6,
             isBlocked = false,
             blockReason = null
         )
@@ -236,21 +236,22 @@ class PacketDecodersTest {
         assertTrue(res.fileName.startsWith("ARIYAN_A9X_HTTPS_"))
         assertTrue(res.fileName.endsWith(".txt"))
         assertTrue(res.packageContent.contains("https://clientbp.ggpolarbear.com/GetLikedRecord"))
-        assertTrue(res.packageContent.contains("Request Hex:\n1a725b2c56ec52ba7d09623454c0a003"))
-        assertTrue(res.packageContent.contains("Response Hex:\n0a00"))
-        assertTrue(res.packageContent.contains("def get_liked_record_response(K, V):"))
+        assertTrue(res.packageContent.contains("Request Hex:\n0a00"))
+        assertTrue(res.packageContent.contains("Response Hex:\n08f4f3c8cf3d"))
+        assertTrue(res.packageContent.contains("def get_liked_record(K, V):"))
         assertTrue(res.packageContent.contains("    fields = {}"))
         assertTrue(res.packageContent.contains("    fields[1] = {}"))
         assertTrue(res.packageContent.contains("    return iZ(str(gZ(fields).hex()), packet_id, K, V)"))
+        assertTrue(!res.packageContent.contains("get_liked_record_response"))
 
         val arr = org.json.JSONArray(res.jsonContent)
         assertEquals(1, arr.length())
         val item = arr.getJSONObject(0)
-        assertEquals(listOf("api", "request", "response"), item.keys().asSequence().toList())
+        assertEquals(listOf("api", "request"), item.keys().asSequence().toList())
         assertEquals("POST https://clientbp.ggpolarbear.com/GetLikedRecord", item.getString("api"))
-        assertTrue(item.isNull("request"))
-        val respObj = item.getJSONObject("response")
-        assertTrue(respObj.has("1"))
+        val reqObj = item.getJSONObject("request")
+        assertTrue(reqObj.has("1"))
+        assertTrue(!item.has("response"))
         assertTrue(!res.jsonContent.contains("\"hex\""))
         assertTrue(!res.jsonContent.contains("0000  "))
         assertTrue(!res.jsonContent.contains("sourceLink"))
@@ -258,7 +259,7 @@ class PacketDecodersTest {
     }
 
     @Test
-    fun `formatHexDump and packetToFormattedJson emit clean hex and api request response without hex`() {
+    fun `formatHexDump and packetToFormattedJson emit clean hex and api request without auto response`() {
         val hexDump = HexUtils.formatHexDump(HexUtils.hexToBytes("160303007a"))
         assertEquals("160303007a", hexDump)
         assertTrue(!hexDump.contains("|"))
@@ -286,15 +287,16 @@ class PacketDecodersTest {
             blockReason = null
         )
         val obj = org.json.JSONObject(com.example.decoder.PacketJsonSerializer.packetToFormattedJson(pkt))
-        assertEquals(listOf("api", "request", "response"), obj.keys().asSequence().toList())
+        assertEquals(listOf("api", "request"), obj.keys().asSequence().toList())
         assertEquals("POST https://clientbp.ggpolarbear.com/GetLikedRecord", obj.getString("api"))
         assertTrue(obj.isNull("request"))
-        assertTrue(obj.getJSONObject("response").has("1"))
+        assertTrue(!obj.has("response"))
 
         val protoReqPkt = pkt.copy(requestBodyHex = "08f4f3c8cf3d1026")
         val protoObj = org.json.JSONObject(com.example.decoder.PacketJsonSerializer.packetToFormattedJson(protoReqPkt))
         assertEquals(16541432308L, protoObj.getJSONObject("request").getLong("1"))
         assertEquals(38L, protoObj.getJSONObject("request").getLong("2"))
+        assertTrue(!protoObj.has("response"))
     }
 
     @Test
@@ -494,73 +496,42 @@ class PacketDecodersTest {
     }
 
     @Test
-    fun `session crypto resolver extracts key and iv from login response and auto-decrypts PurchaseGacha request`() {
-        // 16-byte session key & iv embedded in /MajorLogin response protobuf fields 22 & 23
-        val aesKey = "0123456789abcdef".toByteArray(Charsets.UTF_8)
-        val aesIv = "fedcba9876543210".toByteArray(Charsets.UTF_8)
-        fun pbBytes(fieldNum: Int, data: ByteArray): ByteArray {
-            val tag = (fieldNum shl 3) or 2
-            val out = java.io.ByteArrayOutputStream()
-            fun writeVarint(v: Int) {
-                var x = v
-                while ((x and 0x7F.inv()) != 0) {
-                    out.write((x and 0x7F) or 0x80)
-                    x = x ushr 7
-                }
-                out.write(x)
-            }
-            writeVarint(tag)
-            writeVarint(data.size)
-            out.write(data)
-            return out.toByteArray()
-        }
-        val loginRespBytes = byteArrayOf(0x08, 0x01) + pbBytes(22, aesKey) + pbBytes(23, aesIv)
-        val loginPacket = com.example.data.db.CapturedPacketEntity(
-            id = 1, sessionId = 1, timestamp = 1000L, method = "POST",
-            url = "https://client.ind.freefiremobile.com/MajorLogin",
-            host = "client.ind.freefiremobile.com", path = "/MajorLogin", port = 443,
-            protocol = "HTTPS", statusCode = 200, requestHeadersJson = "{}",
-            requestBodyHex = "", responseHeadersJson = "{}",
-            responseBodyHex = HexUtils.bytesToHex(loginRespBytes),
-            durationMs = 5, bytesTx = 0, bytesRx = loginRespBytes.size,
-            isBlocked = false, blockReason = null
-        )
-
-        // Plaintext PurchaseGacha protobuf: field 1 = 1001, field 2 = 1 -> AES-CBC PKCS5 encrypts to 16 bytes
-        val gachaPlain = byteArrayOf(0x08, 0xE9.toByte(), 0x07, 0x10, 0x01)
-        val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(
-            javax.crypto.Cipher.ENCRYPT_MODE,
-            javax.crypto.spec.SecretKeySpec(aesKey, "AES"),
-            javax.crypto.spec.IvParameterSpec(aesIv)
-        )
-        val gachaEncryptedHex = HexUtils.bytesToHex(cipher.doFinal(gachaPlain))
-        assertEquals(32, gachaEncryptedHex.length)
-
-        val gachaPacket = loginPacket.copy(
+    fun `formatRequestPackageOnly builds clean python package for protobuf request without response decode`() {
+        // Plaintext protobuf: field 1 = 1001, field 2 = 1
+        val reqHex = "08e9071001"
+        val pkt = com.example.data.db.CapturedPacketEntity(
             id = 2,
+            sessionId = 1,
             timestamp = 2000L,
+            method = "POST",
             url = "https://client.ind.freefiremobile.com/PurchaseGacha",
+            host = "client.ind.freefiremobile.com",
             path = "/PurchaseGacha",
-            requestBodyHex = gachaEncryptedHex,
-            responseBodyHex = "0a0a080110d983fcfd021802"
+            port = 443,
+            protocol = "HTTPS",
+            statusCode = 200,
+            requestHeadersJson = "{}",
+            requestBodyHex = reqHex,
+            responseHeadersJson = "{}",
+            responseBodyHex = "0a0a080110d983fcfd021802",
+            durationMs = 5,
+            bytesTx = 5,
+            bytesRx = 12,
+            isBlocked = false,
+            blockReason = null
         )
 
-        val candidates = com.example.decoder.SessionCryptoResolver.buildCandidateKeyIvPairs(
-            sessionPackets = listOf(loginPacket, gachaPacket)
-        )
-        val match = com.example.decoder.SessionCryptoResolver.tryAutoDecrypt(gachaEncryptedHex, candidates)
-        assertNotNull(match)
-        assertEquals(PayloadClassification.PROTOBUF, match!!.analysis.classification)
-
-        val reqPkg = com.example.decoder.BatchDecodeExporter.formatRequestPackageOnly(
-            pkt = gachaPacket,
-            keyCandidates = candidates
-        )
+        val reqPkg = com.example.decoder.BatchDecodeExporter.formatRequestPackageOnly(pkt)
         assertTrue(reqPkg.contains("https://client.ind.freefiremobile.com/PurchaseGacha"))
         assertTrue(reqPkg.contains("def purchase_gacha(K, V):"))
         assertTrue(reqPkg.contains("fields[1] = 1001"))
         assertTrue(reqPkg.contains("fields[2] = 1"))
         assertTrue(reqPkg.contains("return iZ(str(gZ(fields).hex()), packet_id, K, V)"))
+        assertTrue(!reqPkg.contains("response_fields["))
+
+        val encPkt = pkt.copy(requestBodyHex = "ffa1f00b0204c6301c025261692cd59b")
+        val encPkg = com.example.decoder.BatchDecodeExporter.formatRequestPackageOnly(encPkt)
+        assertTrue(encPkg.contains("def purchase_gacha(K, V):"))
+        assertTrue(encPkg.contains("raw_hex = \"ffa1f00b0204c6301c025261692cd59b\""))
     }
 }

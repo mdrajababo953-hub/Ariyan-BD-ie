@@ -36,33 +36,28 @@ object BatchDecodeExporter {
 
     fun filterPacketsByScope(
         packets: List<CapturedPacketEntity>,
-        scope: FullDecodeScope,
-        keyCandidates: List<SessionKeyIv> = emptyList()
+        scope: FullDecodeScope
     ): List<CapturedPacketEntity> {
-        fun isDecodablePacket(pkt: CapturedPacketEntity): Boolean {
-            return PayloadAnalyzer.hasDecodablePayload(pkt.requestBodyHex, pkt.responseBodyHex) ||
-                SessionCryptoResolver.tryAutoDecrypt(pkt.requestBodyHex, keyCandidates) != null
-        }
-
         return when (scope) {
             FullDecodeScope.HTTP_HTTPS -> packets.filter { pkt ->
                 val isHttpProto = pkt.protocol.equals("HTTP", true) || pkt.protocol.equals("HTTPS", true)
                 val isRawTls = pkt.method.equals("TLS", true) || pkt.method.equals("TLS_PIN", true)
                 val looksRawTlsHex = pkt.requestBodyHex.startsWith("1603") || pkt.requestBodyHex.startsWith("1703")
-                isHttpProto && !isRawTls && !(pkt.method.equals("SYN", true) || (pkt.path == "/Passthrough" && looksRawTlsHex)) && isDecodablePacket(pkt)
+                val decodable = PayloadAnalyzer.isStructuredDecodable(pkt.requestBodyHex)
+                isHttpProto && !isRawTls && !(pkt.method.equals("SYN", true) || (pkt.path == "/Passthrough" && looksRawTlsHex)) && decodable
             }
             FullDecodeScope.UDP_DNS -> packets.filter { pkt ->
                 (pkt.protocol.equals("UDP", true) || pkt.protocol.equals("DNS", true)) &&
-                    isDecodablePacket(pkt)
+                    PayloadAnalyzer.isStructuredDecodable(pkt.requestBodyHex)
             }
             FullDecodeScope.TCP -> packets.filter { pkt ->
                 val isTcpScope = pkt.protocol.equals("TCP", true) || pkt.protocol.equals("HTTP", true) || pkt.protocol.equals("HTTPS", true)
                 val isRawTls = pkt.method.equals("TLS", true) || pkt.method.equals("TLS_PIN", true) || pkt.method.equals("SYN", true)
-                isTcpScope && !isRawTls && isDecodablePacket(pkt)
+                isTcpScope && !isRawTls && PayloadAnalyzer.isStructuredDecodable(pkt.requestBodyHex)
             }
             FullDecodeScope.ALL -> packets.filter { pkt ->
                 val isRawTls = pkt.method.equals("TLS", true) || pkt.method.equals("TLS_PIN", true) || pkt.method.equals("SYN", true)
-                !isRawTls && isDecodablePacket(pkt)
+                !isRawTls && PayloadAnalyzer.isStructuredDecodable(pkt.requestBodyHex)
             }
         }
     }
@@ -77,7 +72,6 @@ object BatchDecodeExporter {
         }
         val json = analysis.formattedJson
         if (json != null) {
-            // Skip massive catalog/inventory JSON array dumps
             val trimmed = json.trimStart()
             return json.length <= 3500 && !trimmed.startsWith("[")
         }
@@ -88,21 +82,11 @@ object BatchDecodeExporter {
         session: CaptureSessionEntity?,
         packets: List<CapturedPacketEntity>,
         scope: FullDecodeScope,
-        sessionPackets: List<CapturedPacketEntity> = packets,
-        manualKey: String = "",
-        manualIv: String = "",
-        manualKeyIsHex: Boolean = false,
         onProgress: (processed: Int, total: Int) -> Unit = { _, _ -> }
     ): Pair<String, JSONArray> {
         val total = packets.size
         val requestsArray = JSONArray()
         val entryBlocks = mutableListOf<String>()
-        val keyCandidates = SessionCryptoResolver.buildCandidateKeyIvPairs(
-            sessionPackets = sessionPackets,
-            manualKey = manualKey,
-            manualIv = manualIv,
-            manualIsHex = manualKeyIsHex
-        )
 
         packets.forEachIndexed { index, pkt ->
             onProgress(index + 1, total)
@@ -112,25 +96,18 @@ object BatchDecodeExporter {
             }
             val endpointHint = pkt.path.ifBlank { fullUrl.substringAfter("://").substringAfter("/", "Packet") }
 
-            val (reqAnalysis, _) = SessionCryptoResolver.analyzeWithAutoDecrypt(pkt.requestBodyHex, keyCandidates)
-            val respAnalysis = PayloadAnalyzer.analyze(pkt.responseBodyHex)
-
+            val reqAnalysis = PayloadAnalyzer.analyze(pkt.requestBodyHex)
             val reqClean = isCleanExportableSide(reqAnalysis, endpointHint)
-            val respClean = isCleanExportableSide(respAnalysis, endpointHint)
 
-            // Skip entries whose ONLY decodable part is a bulk repeated-item list / catalog dump
-            if (reqClean || respClean) {
-                val item = PacketJsonSerializer.packetToJsonObject(pkt, keyCandidates)
-                if (!item.isNull("request") || !item.isNull("response")) {
+            if (reqClean) {
+                val item = PacketJsonSerializer.packetToJsonObject(pkt)
+                if (!item.isNull("request")) {
                     requestsArray.put(item)
                     entryBlocks += formatSinglePackageEntry(
                         pkt = pkt,
                         fullUrl = fullUrl,
                         endpointHint = endpointHint,
-                        reqAnalysis = reqAnalysis,
-                        respAnalysis = respAnalysis,
-                        reqClean = reqClean,
-                        respClean = respClean
+                        reqAnalysis = reqAnalysis
                     )
                 }
             }
@@ -148,18 +125,18 @@ object BatchDecodeExporter {
         return report to requestsArray
     }
 
-    fun formatRequestPackageOnly(
-        pkt: CapturedPacketEntity,
-        keyCandidates: List<SessionKeyIv> = emptyList()
-    ): String {
+    fun formatRequestPackageOnly(pkt: CapturedPacketEntity): String {
         val fullUrl = pkt.url.ifBlank {
             val pathPart = pkt.path.ifBlank { "/" }
             "${pkt.protocol.lowercase(Locale.US)}://${pkt.host}$pathPart"
         }
         val endpointHint = pkt.path.ifBlank { fullUrl.substringAfter("://").substringAfter("/", "Packet") }
-        val (reqAnalysis, _) = SessionCryptoResolver.analyzeWithAutoDecrypt(pkt.requestBodyHex, keyCandidates)
+        val reqAnalysis = PayloadAnalyzer.analyze(pkt.requestBodyHex)
         val reqHexClean = HexUtils.sanitizeHex(pkt.requestBodyHex).ifBlank { "<Empty>" }
-        val reqDecodedBlock = formatDecodedBlock(reqAnalysis, endpointHint, isResponse = false)
+        val reqDecodedBlock = ProtobufFieldsFormatter.formatFallbackRequestPackage(
+            analysis = reqAnalysis,
+            endpointOrPath = endpointHint
+        )
         return buildString {
             appendLine(fullUrl)
             appendLine()
@@ -170,25 +147,18 @@ object BatchDecodeExporter {
         }
     }
 
-    fun formatSinglePackageEntry(
-        pkt: CapturedPacketEntity,
-        keyCandidates: List<SessionKeyIv> = emptyList()
-    ): String {
+    fun formatSinglePackageEntry(pkt: CapturedPacketEntity): String {
         val fullUrl = pkt.url.ifBlank {
             val pathPart = pkt.path.ifBlank { "/" }
             "${pkt.protocol.lowercase(Locale.US)}://${pkt.host}$pathPart"
         }
         val endpointHint = pkt.path.ifBlank { fullUrl.substringAfter("://").substringAfter("/", "Packet") }
-        val (reqAnalysis, _) = SessionCryptoResolver.analyzeWithAutoDecrypt(pkt.requestBodyHex, keyCandidates)
-        val respAnalysis = PayloadAnalyzer.analyze(pkt.responseBodyHex)
+        val reqAnalysis = PayloadAnalyzer.analyze(pkt.requestBodyHex)
         return formatSinglePackageEntry(
             pkt = pkt,
             fullUrl = fullUrl,
             endpointHint = endpointHint,
-            reqAnalysis = reqAnalysis,
-            respAnalysis = respAnalysis,
-            reqClean = isCleanExportableSide(reqAnalysis, endpointHint),
-            respClean = isCleanExportableSide(respAnalysis, endpointHint)
+            reqAnalysis = reqAnalysis
         )
     }
 
@@ -196,24 +166,14 @@ object BatchDecodeExporter {
         pkt: CapturedPacketEntity,
         fullUrl: String,
         endpointHint: String,
-        reqAnalysis: PayloadAnalysis,
-        respAnalysis: PayloadAnalysis,
-        reqClean: Boolean,
-        respClean: Boolean
+        reqAnalysis: PayloadAnalysis
     ): String {
         val reqHexClean = HexUtils.sanitizeHex(pkt.requestBodyHex).ifBlank { "<Empty>" }
         val respHexClean = HexUtils.sanitizeHex(pkt.responseBodyHex).ifBlank { "<Empty>" }
-
-        val reqDecodedBlock = if (reqClean) {
-            formatDecodedBlock(reqAnalysis, endpointHint, isResponse = false)
-        } else {
-            skippedComment(reqAnalysis)
-        }
-        val respDecodedBlock = if (respClean) {
-            formatDecodedBlock(respAnalysis, endpointHint, isResponse = true)
-        } else {
-            skippedComment(respAnalysis)
-        }
+        val reqDecodedBlock = ProtobufFieldsFormatter.formatFallbackRequestPackage(
+            analysis = reqAnalysis,
+            endpointOrPath = endpointHint
+        )
 
         return buildString {
             appendLine(fullUrl)
@@ -224,39 +184,7 @@ object BatchDecodeExporter {
             appendLine("Response Hex:")
             appendLine(respHexClean)
             appendLine()
-            appendLine(reqDecodedBlock)
-            appendLine()
-            append(respDecodedBlock)
-        }
-    }
-
-    private fun skippedComment(analysis: PayloadAnalysis): String {
-        return when {
-            analysis.classification == PayloadClassification.EMPTY -> "# <Empty>"
-            analysis.protobuf != null -> "# <Skipped repeated catalog list>"
-            analysis.formattedJson != null -> "# <Skipped bulk JSON array>"
-            else -> "# <${analysis.classification.name} (${analysis.byteCount}B)>"
-        }
-    }
-
-    private fun formatDecodedBlock(
-        analysis: PayloadAnalysis,
-        endpointHint: String,
-        isResponse: Boolean
-    ): String {
-        val proto = analysis.protobuf
-        return when {
-            proto != null -> {
-                ProtobufFieldsFormatter.formatSmartPythonPackage(
-                    nodes = proto.fields,
-                    endpointOrPath = endpointHint,
-                    isResponse = isResponse
-                )
-            }
-            analysis.formattedJson != null -> analysis.formattedJson
-            analysis.utf8Text != null && analysis.classification == PayloadClassification.TEXT -> analysis.utf8Text
-            analysis.classification == PayloadClassification.EMPTY -> "# <Empty>"
-            else -> "# <${analysis.classification.name} (${analysis.byteCount}B)>"
+            append(reqDecodedBlock)
         }
     }
 
@@ -265,19 +193,10 @@ object BatchDecodeExporter {
         session: CaptureSessionEntity?,
         packets: List<CapturedPacketEntity>,
         scope: FullDecodeScope,
-        manualKey: String = "",
-        manualIv: String = "",
-        manualKeyIsHex: Boolean = false,
         onProgress: (processed: Int, total: Int) -> Unit
     ): Result<FullDecodeResult> = withContext(Dispatchers.IO) {
         runCatching {
-            val keyCandidates = SessionCryptoResolver.buildCandidateKeyIvPairs(
-                sessionPackets = packets,
-                manualKey = manualKey,
-                manualIv = manualIv,
-                manualIsHex = manualKeyIsHex
-            )
-            val matching = filterPacketsByScope(packets, scope, keyCandidates)
+            val matching = filterPacketsByScope(packets, scope)
             require(matching.isNotEmpty()) {
                 "No decodable ${scope.label} payloads found in this session."
             }
@@ -286,10 +205,6 @@ object BatchDecodeExporter {
                 session = session,
                 packets = matching,
                 scope = scope,
-                sessionPackets = packets,
-                manualKey = manualKey,
-                manualIv = manualIv,
-                manualKeyIsHex = manualKeyIsHex,
                 onProgress = onProgress
             )
 

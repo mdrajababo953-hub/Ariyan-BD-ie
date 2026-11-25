@@ -67,7 +67,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.R
 import com.example.data.db.CapturedPacketEntity
-import com.example.decoder.AutoDecryptMatch
 import com.example.decoder.BatchDecodeExporter
 import com.example.decoder.DecryptMode
 import com.example.decoder.HexUtils
@@ -79,8 +78,6 @@ import com.example.decoder.PayloadAnalyzer
 import com.example.decoder.PayloadClassification
 import com.example.decoder.PayloadDecryptor
 import com.example.decoder.ProtobufFieldsFormatter
-import com.example.decoder.SessionCryptoResolver
-import com.example.decoder.SessionKeyIv
 import com.example.ui.components.AppIcons
 import com.example.ui.components.Formatters
 import com.example.ui.components.MethodBadge
@@ -93,19 +90,16 @@ import com.example.ui.theme.CoralAlert
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.VioletProto
-import com.example.ui.viewmodel.SessionCryptoUiState
 
 private data class PacketDetailComputed(
     val packetJson: String,
     val requestPackageText: String,
     val fullPackageText: String,
     val reqDecodedText: String?,
-    val respDecodedText: String?,
     val reqHeaders: Map<String, String>,
     val respHeaders: Map<String, String>,
     val jwtDecoded: JwtDecodeResult?,
     val reqAnalysis: PayloadAnalysis,
-    val autoDecryptMatch: AutoDecryptMatch?,
     val respAnalysis: PayloadAnalysis
 )
 
@@ -114,9 +108,6 @@ private data class PacketDetailComputed(
 fun PacketDetailScreen(
     packet: CapturedPacketEntity,
     isPaneMode: Boolean,
-    sessionKeyIvCandidates: List<SessionKeyIv> = emptyList(),
-    sessionCryptoState: SessionCryptoUiState = SessionCryptoUiState(),
-    onSaveSessionKey: (key: String, iv: String, isHex: Boolean) -> Unit = { _, _, _ -> },
     onBack: () -> Unit,
     onShareJson: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit,
@@ -131,25 +122,18 @@ fun PacketDetailScreen(
 
     val computed by produceState<PacketDetailComputed?>(
         initialValue = null,
-        key1 = packet,
-        key2 = sessionKeyIvCandidates
+        key1 = packet
     ) {
         value = withContext(Dispatchers.Default) {
-            val (effectiveReqAnalysis, autoMatch) = SessionCryptoResolver.analyzeWithAutoDecrypt(
-                hexInput = packet.requestBodyHex,
-                candidates = sessionKeyIvCandidates
-            )
             PacketDetailComputed(
-                packetJson = PacketJsonSerializer.packetToFormattedJson(packet, sessionKeyIvCandidates),
-                requestPackageText = BatchDecodeExporter.formatRequestPackageOnly(packet, sessionKeyIvCandidates),
-                fullPackageText = BatchDecodeExporter.formatSinglePackageEntry(packet, sessionKeyIvCandidates),
-                reqDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.requestBodyHex, sessionKeyIvCandidates),
-                respDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.responseBodyHex),
+                packetJson = PacketJsonSerializer.packetToFormattedJson(packet),
+                requestPackageText = BatchDecodeExporter.formatRequestPackageOnly(packet),
+                fullPackageText = BatchDecodeExporter.formatSinglePackageEntry(packet),
+                reqDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.requestBodyHex),
                 reqHeaders = PacketJsonSerializer.parseHeadersMap(packet.requestHeadersJson),
                 respHeaders = PacketJsonSerializer.parseHeadersMap(packet.responseHeadersJson),
                 jwtDecoded = JwtDecoder.extractFromHeaders(packet.requestHeadersJson),
-                reqAnalysis = effectiveReqAnalysis,
-                autoDecryptMatch = autoMatch,
+                reqAnalysis = PayloadAnalyzer.analyze(packet.requestBodyHex),
                 respAnalysis = PayloadAnalyzer.analyze(packet.responseBodyHex)
             )
         }
@@ -236,10 +220,6 @@ fun PacketDetailScreen(
                         fullPackageText = ready.fullPackageText,
                         jwtDecoded = ready.jwtDecoded,
                         reqAnalysis = ready.reqAnalysis,
-                        autoDecryptMatch = ready.autoDecryptMatch,
-                        respAnalysis = ready.respAnalysis,
-                        sessionCryptoState = sessionCryptoState,
-                        onSaveSessionKey = onSaveSessionKey,
                         onSharePackage = { onShareJson(ready.requestPackageText) },
                         onCopyToast = onCopyToast,
                         onSendToDecoderLab = onSendToDecoderLab
@@ -247,12 +227,10 @@ fun PacketDetailScreen(
                     1 -> JsonTabContent(
                         packet = packet,
                         reqDecodedText = ready.reqDecodedText,
-                        respDecodedText = ready.respDecodedText,
                         reqAnalysis = ready.reqAnalysis,
-                        respAnalysis = ready.respAnalysis,
                         onCopyAll = {
                             clipboard.setText(AnnotatedString(ready.packetJson))
-                            onCopyToast("Combined Request + Response JSON copied")
+                            onCopyToast("Request JSON copied")
                         },
                         onShare = { onShareJson(ready.packetJson) },
                         onCopyToast = onCopyToast
@@ -371,10 +349,6 @@ private fun DecodeTabContent(
     fullPackageText: String,
     jwtDecoded: JwtDecodeResult?,
     reqAnalysis: PayloadAnalysis,
-    autoDecryptMatch: AutoDecryptMatch?,
-    respAnalysis: PayloadAnalysis,
-    sessionCryptoState: SessionCryptoUiState,
-    onSaveSessionKey: (key: String, iv: String, isHex: Boolean) -> Unit,
     onSharePackage: () -> Unit,
     onCopyToast: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit
@@ -395,10 +369,7 @@ private fun DecodeTabContent(
                 endpointPath = packet.path,
                 isResponse = false,
                 analysis = reqAnalysis,
-                autoDecryptMatch = autoDecryptMatch,
                 rawHex = packet.requestBodyHex,
-                sessionCryptoState = sessionCryptoState,
-                onSaveSessionKey = onSaveSessionKey,
                 onCopyToast = onCopyToast,
                 onSendToDecoderLab = onSendToDecoderLab
             )
@@ -526,15 +497,13 @@ private fun DualBodyHexOverviewCard(
                     }
                     if (showResponse) {
                         CompactHexStrip(
-                            label = "Response Hex (${cleanResp.length / 2}B)",
+                            label = "Response Hex (${cleanResp.length / 2}B — copy & paste in Decoder tab)",
                             hex = cleanResp,
                             onCopy = {
                                 clipboard.setText(AnnotatedString(cleanResp))
-                                onCopyToast("Response Hex copied")
+                                onCopyToast("Full Response Hex copied (${cleanResp.length / 2}B)")
                             },
-                            onOpenInLab = onOpenInLab?.let { open ->
-                                if (cleanResp.isNotBlank()) ({ open(responseHex) }) else null
-                            }
+                            onOpenInLab = null
                         )
                     }
                 }
@@ -732,29 +701,17 @@ fun PayloadDecodedSection(
     endpointPath: String = "/Packet",
     isResponse: Boolean = false,
     analysis: PayloadAnalysis,
-    autoDecryptMatch: AutoDecryptMatch? = null,
     rawHex: String,
-    sessionCryptoState: SessionCryptoUiState = SessionCryptoUiState(),
-    onSaveSessionKey: (key: String, iv: String, isHex: Boolean) -> Unit = { _, _, _ -> },
     onCopyToast: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit
 ) {
     val decryptScope = rememberCoroutineScope()
     var protoViewMode by remember(rawHex) { mutableIntStateOf(0) }
     var decryptedProtoViewMode by remember(rawHex) { mutableIntStateOf(0) }
-    var showDecryptor by remember(rawHex, autoDecryptMatch) {
-        mutableStateOf(!isResponse && autoDecryptMatch == null && analysis.classification == PayloadClassification.ENCRYPTED_BLOCK)
-    }
-    var keyInput by remember(rawHex, sessionCryptoState.manualKey) {
-        mutableStateOf(sessionCryptoState.manualKey)
-    }
-    var ivInput by remember(rawHex, sessionCryptoState.manualIv) {
-        mutableStateOf(sessionCryptoState.manualIv)
-    }
-    var keyIsHex by remember(rawHex, sessionCryptoState.manualKeyIsHex) {
-        mutableStateOf(sessionCryptoState.manualKeyIsHex)
-    }
-    var saveForSession by remember(rawHex) { mutableStateOf(true) }
+    var showDecryptor by remember(rawHex) { mutableStateOf(false) }
+    var keyInput by remember(rawHex) { mutableStateOf("") }
+    var ivInput by remember(rawHex) { mutableStateOf("") }
+    var keyIsHex by remember(rawHex) { mutableStateOf(false) }
     var mode by remember { mutableStateOf(DecryptMode.AES_CBC_PKCS5) }
     var isDecrypting by remember(rawHex) { mutableStateOf(false) }
     var decryptResult by remember(rawHex) { mutableStateOf<PayloadAnalysis?>(null) }
@@ -794,20 +751,12 @@ fun PayloadDecodedSection(
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f)
                 )
-                if (autoDecryptMatch != null) {
-                    TagChip(text = "AES AUTO", color = EmeraldPulse)
-                    Spacer(modifier = Modifier.width(6.dp))
-                }
                 TagChip(text = analysis.classification.name, color = badgeColor)
             }
 
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = if (autoDecryptMatch != null) {
-                    "${autoDecryptMatch.sourceLabel} (${autoDecryptMatch.mode.label}) • ${analysis.summary}"
-                } else {
-                    analysis.summary
-                },
+                text = analysis.summary,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -878,24 +827,46 @@ fun PayloadDecodedSection(
                     }
                 }
 
-                if (analysis.protobuf == null && analysis.formattedJson != null) {
-                    SyntaxHighlightedJsonBlock(
-                        json = analysis.formattedJson,
-                        title = "Decoded JSON",
-                        onCopy = { onCopyToast("JSON copied") }
+                val fallbackPackagePy by produceState(
+                    initialValue = "",
+                    key1 = analysis,
+                    key2 = endpointPath
+                ) {
+                    value = withContext(Dispatchers.Default) {
+                        ProtobufFieldsFormatter.formatFallbackRequestPackage(
+                            analysis = analysis,
+                            endpointOrPath = endpointPath
+                        )
+                    }
+                }
+
+                if (analysis.protobuf == null) {
+                    PythonFieldsCodeBlock(
+                        code = fallbackPackagePy,
+                        title = "Request Package (PY)",
+                        onCopy = { onCopyToast("Python package copied") }
                     )
-                } else if (analysis.protobuf == null && analysis.utf8Text != null) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        SelectionContainer {
-                            Text(
-                                text = analysis.utf8Text,
-                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
-                                modifier = Modifier.padding(12.dp)
-                            )
+                    if (analysis.formattedJson != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SyntaxHighlightedJsonBlock(
+                            json = analysis.formattedJson,
+                            title = "Decoded JSON",
+                            onCopy = { onCopyToast("JSON copied") }
+                        )
+                    } else if (analysis.utf8Text != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    text = analysis.utf8Text,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
+                                    modifier = Modifier.padding(12.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -905,7 +876,7 @@ fun PayloadDecodedSection(
                 ) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Encrypted AES payload (${analysis.byteCount}B). Enter your Session Key & IV below to decode into Python Package, or auto-capture /MajorLogin first.",
+                        text = "Binary / encrypted payload (${analysis.byteCount}B). Enter AES / XOR key below or open in Decoder tab to decrypt.",
                         style = MaterialTheme.typography.labelSmall,
                         color = AmberSignal
                     )
@@ -941,7 +912,7 @@ fun PayloadDecodedSection(
                     ) {
                         HorizontalDivider()
                         Text(
-                            text = if (isResponse) "AES / Session Key Decryptor" else "Decode Request (AES / Session Key)",
+                            text = if (isResponse) "AES / XOR Payload Decryptor" else "Decode Request (AES / XOR)",
                             style = MaterialTheme.typography.labelLarge,
                             color = AmberSignal
                         )
@@ -992,12 +963,8 @@ fun PayloadDecodedSection(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text("Key/IV is Hex", style = MaterialTheme.typography.bodySmall)
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Switch(checked = keyIsHex, onCheckedChange = { keyIsHex = it })
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text("Save Session", style = MaterialTheme.typography.bodySmall)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Switch(checked = saveForSession, onCheckedChange = { saveForSession = it })
                         }
                         Button(
                             enabled = !isDecrypting && keyInput.isNotBlank(),
@@ -1017,9 +984,6 @@ fun PayloadDecodedSection(
                                         onSuccess = {
                                             decryptResult = it
                                             decryptError = null
-                                            if (saveForSession) {
-                                                onSaveSessionKey(keyInput, ivInput, keyIsHex)
-                                            }
                                         },
                                         onFailure = {
                                             decryptResult = null
@@ -1148,9 +1112,7 @@ fun PayloadDecodedSection(
 private fun JsonTabContent(
     packet: CapturedPacketEntity,
     reqDecodedText: String?,
-    respDecodedText: String?,
     reqAnalysis: PayloadAnalysis,
-    respAnalysis: PayloadAnalysis,
     onCopyAll: () -> Unit,
     onShare: () -> Unit,
     onCopyToast: (String) -> Unit
@@ -1222,18 +1184,6 @@ private fun JsonTabContent(
                 onCopy = { text ->
                     clipboard.setText(AnnotatedString(text))
                     onCopyToast("Request decoded JSON copied")
-                }
-            )
-        }
-
-        item {
-            SeparateDecodedJsonCard(
-                title = "Response Decoded JSON",
-                decodedText = respDecodedText,
-                analysis = respAnalysis,
-                onCopy = { text ->
-                    clipboard.setText(AnnotatedString(text))
-                    onCopyToast("Response decoded JSON copied")
                 }
             )
         }

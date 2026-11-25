@@ -78,7 +78,6 @@ import com.example.data.db.CaptureSessionEntity
 import com.example.data.db.CapturedPacketEntity
 import com.example.data.prefs.CaptureEngineMode
 import com.example.data.prefs.TargetAppSelection
-import com.example.decoder.SessionKeyIv
 import com.example.proxy.LocalProxyRuntimeState
 import com.example.ui.components.AppIconAvatar
 import com.example.ui.components.AppIcons
@@ -90,7 +89,6 @@ import com.example.ui.theme.CoralAlert
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.viewmodel.PacketFilterChip
-import com.example.ui.viewmodel.SessionCryptoUiState
 import com.example.vpn.VpnRuntimeState
 
 private data class ServerPreset(
@@ -124,9 +122,6 @@ fun CaptureDashboardScreen(
     httpsMitmEnabled: Boolean,
     caReady: Boolean,
     caTrusted: Boolean,
-    sessionKeyIvCandidates: List<SessionKeyIv> = emptyList(),
-    sessionCryptoState: SessionCryptoUiState = SessionCryptoUiState(),
-    onSaveSessionKey: (key: String, iv: String, isHex: Boolean) -> Unit = { _, _, _ -> },
     onModeChange: (CaptureEngineMode) -> Unit,
     onToggleVpnFullPacket: (Boolean) -> Unit,
     onStartLocalProxy: (Int, String) -> Unit,
@@ -251,9 +246,6 @@ fun CaptureDashboardScreen(
                         PacketDetailScreen(
                             packet = selectedPacket,
                             isPaneMode = true,
-                            sessionKeyIvCandidates = sessionKeyIvCandidates,
-                            sessionCryptoState = sessionCryptoState,
-                            onSaveSessionKey = onSaveSessionKey,
                             onBack = {},
                             onShareJson = onShareJson,
                             onSendToDecoderLab = onSendToDecoderLab,

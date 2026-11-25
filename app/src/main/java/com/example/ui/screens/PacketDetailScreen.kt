@@ -187,7 +187,7 @@ fun PacketDetailScreen(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text("Decode") },
+                    text = { Text("BODY") },
                     modifier = Modifier.testTag("packet_tab_decode")
                 )
                 Tab(
@@ -356,129 +356,85 @@ private fun DecodeTabContent(
     onSendToDecoderLab: (String) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
-    val reqDecodable = reqAnalysis.classification == PayloadClassification.PROTOBUF ||
-        reqAnalysis.classification == PayloadClassification.JSON
-    val respDecodable = respAnalysis.classification == PayloadClassification.PROTOBUF ||
-        respAnalysis.classification == PayloadClassification.JSON
-    // 0 = Both (Request + Response together), 1 = Request only, 2 = Response only
-    var viewScope by remember(packet.id) { mutableIntStateOf(0) }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        SingleChoiceSegmentedButtonRow(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp)
-                .testTag("decode_request_response_switch")
-        ) {
-            SegmentedButton(
-                selected = viewScope == 0,
-                onClick = { viewScope = 0 },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3)
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("decode_request_response_switch")
+    ) {
+        // 1. First & foremost: Request Package
+        item {
+            PayloadDecodedSection(
+                title = "Request Package",
+                endpointPath = packet.path,
+                isResponse = false,
+                analysis = reqAnalysis,
+                rawHex = packet.requestBodyHex,
+                onCopyToast = onCopyToast,
+                onSendToDecoderLab = onSendToDecoderLab
+            )
+        }
+
+        // 2. Immediately second: Response Package
+        item {
+            PayloadDecodedSection(
+                title = "Response Package",
+                endpointPath = packet.path,
+                isResponse = true,
+                analysis = respAnalysis,
+                rawHex = packet.responseBodyHex,
+                onCopyToast = onCopyToast,
+                onSendToDecoderLab = onSendToDecoderLab
+            )
+        }
+
+        // 3. One-tap copy & share full combined package (URL + Hex + Request & Response Packages)
+        item {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text("BOTH (REQ+RESP)", maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            SegmentedButton(
-                selected = viewScope == 1,
-                onClick = { viewScope = 1 },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3)
-            ) {
-                Text(
-                    text = if (reqDecodable) "REQ (${reqAnalysis.classification.name})" else "REQ (${reqAnalysis.byteCount}B)",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            SegmentedButton(
-                selected = viewScope == 2,
-                onClick = { viewScope = 2 },
-                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3)
-            ) {
-                Text(
-                    text = if (respDecodable) "RESP (${respAnalysis.classification.name})" else "RESP (${respAnalysis.byteCount}B)",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Button(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(fullPackageText))
+                        onCopyToast("Full URL + Hex + Both Packages copied")
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("decode_copy_full_package_button")
+                ) {
+                    Icon(AppIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Copy Full Package", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                OutlinedButton(
+                    onClick = onSharePackage,
+                    modifier = Modifier.testTag("decode_share_full_package_button")
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Share")
+                }
             }
         }
 
-        LazyColumn(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-        ) {
+        // 4. Raw Body Hex overview (Request & Response)
+        item {
+            DualBodyHexOverviewCard(
+                requestHex = packet.requestBodyHex,
+                responseHex = packet.responseBodyHex,
+                showRequest = true,
+                showResponse = true,
+                onCopyToast = onCopyToast
+            )
+        }
+
+        // 5. JWT Claims (if Authorization Bearer JWT is present)
+        if (jwtDecoded != null) {
             item {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Button(
-                        onClick = {
-                            clipboard.setText(AnnotatedString(fullPackageText))
-                            onCopyToast("Full URL + Hex + Both Packages copied")
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("decode_copy_full_package_button")
-                    ) {
-                        Icon(AppIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copy Full Package", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    OutlinedButton(
-                        onClick = onSharePackage,
-                        modifier = Modifier.testTag("decode_share_full_package_button")
-                    ) {
-                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Share")
-                    }
-                }
-            }
-
-            if (viewScope != 2 && jwtDecoded != null) {
-                item {
-                    JwtDecodedCard(jwt = jwtDecoded, onCopyToast = onCopyToast)
-                }
-            }
-
-            item {
-                DualBodyHexOverviewCard(
-                    requestHex = packet.requestBodyHex,
-                    responseHex = packet.responseBodyHex,
-                    showRequest = viewScope != 2,
-                    showResponse = viewScope != 1,
-                    onCopyToast = onCopyToast
-                )
-            }
-
-            if (viewScope == 0 || viewScope == 1) {
-                item {
-                    PayloadDecodedSection(
-                        title = "Request Decoded Package",
-                        endpointPath = packet.path,
-                        isResponse = false,
-                        analysis = reqAnalysis,
-                        rawHex = packet.requestBodyHex,
-                        onCopyToast = onCopyToast,
-                        onSendToDecoderLab = onSendToDecoderLab
-                    )
-                }
-            }
-
-            if (viewScope == 0 || viewScope == 2) {
-                item {
-                    PayloadDecodedSection(
-                        title = "Response Decoded Package",
-                        endpointPath = packet.path,
-                        isResponse = true,
-                        analysis = respAnalysis,
-                        rawHex = packet.responseBodyHex,
-                        onCopyToast = onCopyToast,
-                        onSendToDecoderLab = onSendToDecoderLab
-                    )
-                }
+                JwtDecodedCard(jwt = jwtDecoded, onCopyToast = onCopyToast)
             }
         }
     }

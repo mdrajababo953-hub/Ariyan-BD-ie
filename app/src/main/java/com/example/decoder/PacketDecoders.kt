@@ -773,14 +773,39 @@ object ProtobufFieldsFormatter {
         isResponse: Boolean = false,
         packetHeaderHex: String = "0E15"
     ): String {
-        if (isResponse) {
-            return formatBracketDict(nodes, varName = "response_fields")
+        if (!isResponse && isLoginPayload(nodes, endpointOrPath)) {
+            return formatLoginPayloadPython(nodes)
         }
-        return if (isLoginPayload(nodes, endpointOrPath)) {
-            formatLoginPayloadPython(nodes)
-        } else {
-            formatEndpointPackagePython(nodes, endpointOrPath, packetHeaderHex)
+        val cleanTarget = endpointOrPath
+            .substringBefore("?")
+            .substringAfterLast("/")
+            .ifBlank { "Packet" }
+        val fnEndpoint = if (isResponse) "${cleanTarget}_response" else cleanTarget
+        return formatEndpointPackagePython(nodes, fnEndpoint, packetHeaderHex)
+    }
+
+    fun isCleanPackageProtobuf(nodes: List<ProtobufFieldNode>, endpointOrPath: String = ""): Boolean {
+        if (nodes.isEmpty()) return false
+        if (isLoginPayload(nodes, endpointOrPath)) return true
+        var totalNodes = 0
+        fun walk(list: List<ProtobufFieldNode>): Boolean {
+            val grouped = list.groupBy { it.fieldNumber }
+            for ((_, items) in grouped) {
+                totalNodes += items.size
+                if (totalNodes > 80) return false
+                // Repeated message objects ([{1: 1001, ...}, {1: 1001, ...}]) are catalog/inventory dumps
+                if (items.size >= 2 && items.any { it.children.isNotEmpty() || it.isEmptyMessage }) {
+                    return false
+                }
+                for (item in items) {
+                    if (item.children.isNotEmpty() && !walk(item.children)) {
+                        return false
+                    }
+                }
+            }
+            return true
         }
+        return walk(nodes)
     }
 
     fun isLoginPayload(nodes: List<ProtobufFieldNode>, endpointOrPath: String): Boolean {
@@ -843,6 +868,16 @@ object ProtobufFieldsFormatter {
                             )
                         }
                     }
+                } else if (items.any { it.children.isNotEmpty() || it.isEmptyMessage }) {
+                    appendLine("    P[$fieldNum]$padNum = {}")
+                    items.forEachIndexed { subIdx, subNode ->
+                        appendBracketEntry(
+                            out = this,
+                            prefix = "P[$fieldNum][$subIdx]",
+                            node = subNode,
+                            indent = "    "
+                        )
+                    }
                 } else {
                     val listItems = items.joinToString(", ") { formatSingleValue(it, 2) }
                     appendLine("    P[$fieldNum]$padNum = [$listItems]")
@@ -881,6 +916,7 @@ object ProtobufFieldsFormatter {
                 val grouped = nodes.groupBy { it.fieldNumber }
                 val entries = grouped.entries.toList()
                 entries.forEachIndexed { idx, (fieldNum, items) ->
+                    val isLastGroup = idx == entries.lastIndex
                     val target = "$varName[$fieldNum]"
                     if (items.size == 1) {
                         appendBracketEntry(
@@ -888,11 +924,23 @@ object ProtobufFieldsFormatter {
                             prefix = target,
                             node = items.first(),
                             indent = indent,
-                            trailingNewline = idx < entries.lastIndex
+                            trailingNewline = !isLastGroup
                         )
+                    } else if (items.any { it.children.isNotEmpty() || it.isEmptyMessage }) {
+                        appendLine("$indent$target = {}")
+                        items.forEachIndexed { subIdx, subNode ->
+                            val isLastItem = isLastGroup && subIdx == items.lastIndex
+                            appendBracketEntry(
+                                out = this,
+                                prefix = "$target[$subIdx]",
+                                node = subNode,
+                                indent = indent,
+                                trailingNewline = !isLastItem
+                            )
+                        }
                     } else {
                         val listItems = items.joinToString(", ") { formatSingleValue(it, 1) }
-                        if (idx < entries.lastIndex) {
+                        if (!isLastGroup) {
                             appendLine("$indent$target = [$listItems]")
                         } else {
                             append("$indent$target = [$listItems]")
@@ -931,6 +979,18 @@ object ProtobufFieldsFormatter {
                             indent = indent,
                             trailingNewline = if (isLast) trailingNewline else true
                         )
+                    } else if (subItems.any { it.children.isNotEmpty() || it.isEmptyMessage }) {
+                        out.appendLine("$indent$subPrefix = {}")
+                        subItems.forEachIndexed { subIdx, childItem ->
+                            val isLastChild = isLast && subIdx == subItems.lastIndex
+                            appendBracketEntry(
+                                out = out,
+                                prefix = "$subPrefix[$subIdx]",
+                                node = childItem,
+                                indent = indent,
+                                trailingNewline = if (isLastChild) trailingNewline else true
+                            )
+                        }
                     } else {
                         val listItems = subItems.joinToString(", ") { formatSingleValue(it, 1) }
                         if (!isLast || trailingNewline) {

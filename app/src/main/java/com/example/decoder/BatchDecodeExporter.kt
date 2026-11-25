@@ -62,6 +62,23 @@ object BatchDecodeExporter {
         }
     }
 
+    private fun isCleanExportableSide(
+        analysis: PayloadAnalysis,
+        endpointHint: String
+    ): Boolean {
+        val proto = analysis.protobuf
+        if (proto != null) {
+            return ProtobufFieldsFormatter.isCleanPackageProtobuf(proto.fields, endpointHint)
+        }
+        val json = analysis.formattedJson
+        if (json != null) {
+            // Skip massive catalog/inventory JSON array dumps
+            val trimmed = json.trimStart()
+            return json.length <= 3500 && !trimmed.startsWith("[")
+        }
+        return false
+    }
+
     fun buildPremiumPackageReport(
         session: CaptureSessionEntity?,
         packets: List<CapturedPacketEntity>,
@@ -74,10 +91,33 @@ object BatchDecodeExporter {
 
         packets.forEachIndexed { index, pkt ->
             onProgress(index + 1, total)
-            val item = PacketJsonSerializer.packetToJsonObject(pkt)
-            if (!item.isNull("request") || !item.isNull("response")) {
-                requestsArray.put(item)
-                entryBlocks += formatSinglePackageEntry(pkt)
+            val fullUrl = pkt.url.ifBlank {
+                val pathPart = pkt.path.ifBlank { "/" }
+                "${pkt.protocol.lowercase(Locale.US)}://${pkt.host}$pathPart"
+            }
+            val endpointHint = pkt.path.ifBlank { fullUrl.substringAfter("://").substringAfter("/", "Packet") }
+
+            val reqAnalysis = PayloadAnalyzer.analyze(pkt.requestBodyHex)
+            val respAnalysis = PayloadAnalyzer.analyze(pkt.responseBodyHex)
+
+            val reqClean = isCleanExportableSide(reqAnalysis, endpointHint)
+            val respClean = isCleanExportableSide(respAnalysis, endpointHint)
+
+            // Skip entries whose ONLY decodable part is a bulk repeated-item list / catalog dump
+            if (reqClean || respClean) {
+                val item = PacketJsonSerializer.packetToJsonObject(pkt)
+                if (!item.isNull("request") || !item.isNull("response")) {
+                    requestsArray.put(item)
+                    entryBlocks += formatSinglePackageEntry(
+                        pkt = pkt,
+                        fullUrl = fullUrl,
+                        endpointHint = endpointHint,
+                        reqAnalysis = reqAnalysis,
+                        respAnalysis = respAnalysis,
+                        reqClean = reqClean,
+                        respClean = respClean
+                    )
+                }
             }
         }
 
@@ -98,24 +138,42 @@ object BatchDecodeExporter {
             val pathPart = pkt.path.ifBlank { "/" }
             "${pkt.protocol.lowercase(Locale.US)}://${pkt.host}$pathPart"
         }
+        val endpointHint = pkt.path.ifBlank { fullUrl.substringAfter("://").substringAfter("/", "Packet") }
+        val reqAnalysis = PayloadAnalyzer.analyze(pkt.requestBodyHex)
+        val respAnalysis = PayloadAnalyzer.analyze(pkt.responseBodyHex)
+        return formatSinglePackageEntry(
+            pkt = pkt,
+            fullUrl = fullUrl,
+            endpointHint = endpointHint,
+            reqAnalysis = reqAnalysis,
+            respAnalysis = respAnalysis,
+            reqClean = isCleanExportableSide(reqAnalysis, endpointHint),
+            respClean = isCleanExportableSide(respAnalysis, endpointHint)
+        )
+    }
+
+    private fun formatSinglePackageEntry(
+        pkt: CapturedPacketEntity,
+        fullUrl: String,
+        endpointHint: String,
+        reqAnalysis: PayloadAnalysis,
+        respAnalysis: PayloadAnalysis,
+        reqClean: Boolean,
+        respClean: Boolean
+    ): String {
         val reqHexClean = HexUtils.sanitizeHex(pkt.requestBodyHex).ifBlank { "<Empty>" }
         val respHexClean = HexUtils.sanitizeHex(pkt.responseBodyHex).ifBlank { "<Empty>" }
 
-        val reqAnalysis = PayloadAnalyzer.analyze(pkt.requestBodyHex)
-        val respAnalysis = PayloadAnalyzer.analyze(pkt.responseBodyHex)
-
-        val endpointHint = pkt.path.ifBlank { fullUrl.substringAfter("://").substringAfter("/", "Packet") }
-
-        val reqDecodedBlock = formatDecodedBlock(
-            analysis = reqAnalysis,
-            endpointHint = endpointHint,
-            isResponse = false
-        )
-        val respDecodedBlock = formatDecodedBlock(
-            analysis = respAnalysis,
-            endpointHint = endpointHint,
-            isResponse = true
-        )
+        val reqDecodedBlock = if (reqClean) {
+            formatDecodedBlock(reqAnalysis, endpointHint, isResponse = false)
+        } else {
+            skippedComment(reqAnalysis)
+        }
+        val respDecodedBlock = if (respClean) {
+            formatDecodedBlock(respAnalysis, endpointHint, isResponse = true)
+        } else {
+            skippedComment(respAnalysis)
+        }
 
         return buildString {
             appendLine(fullUrl)
@@ -126,11 +184,18 @@ object BatchDecodeExporter {
             appendLine("Response Hex:")
             appendLine(respHexClean)
             appendLine()
-            appendLine("# === Request Decoded Package ===")
             appendLine(reqDecodedBlock)
             appendLine()
-            appendLine("# === Response Decoded Package ===")
             append(respDecodedBlock)
+        }
+    }
+
+    private fun skippedComment(analysis: PayloadAnalysis): String {
+        return when {
+            analysis.classification == PayloadClassification.EMPTY -> "# <Empty>"
+            analysis.protobuf != null -> "# <Skipped repeated catalog list>"
+            analysis.formattedJson != null -> "# <Skipped bulk JSON array>"
+            else -> "# <${analysis.classification.name} (${analysis.byteCount}B)>"
         }
     }
 
@@ -176,7 +241,7 @@ object BatchDecodeExporter {
             )
 
             require(requestsArray.length() > 0) {
-                "No decodable ${scope.label} payloads found in this session."
+                "No clean packageable ${scope.label} payloads found (bulk catalog lists skipped)."
             }
 
             val tsFmt = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
@@ -204,36 +269,65 @@ object BatchDecodeExporter {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOCUMENTS}/Aryan")
-            }
-            val uri = resolver.insert(MediaStore.Files.getContentUri("external"), values)
-            if (uri != null) {
-                resolver.openOutputStream(uri)?.use { out ->
-                    out.write(bytes)
-                    out.flush()
-                }
-                return "Documents/Aryan/$fileName" to uri
+            val candidates = listOf(
+                Triple(MediaStore.Files.getContentUri("external"), "${Environment.DIRECTORY_DOCUMENTS}/Aryan", "text/plain"),
+                Triple(MediaStore.Files.getContentUri("external"), Environment.DIRECTORY_DOCUMENTS, "text/plain"),
+                Triple(MediaStore.Downloads.getContentUri("external"), "${Environment.DIRECTORY_DOWNLOADS}/Aryan", "text/plain"),
+                Triple(MediaStore.Downloads.getContentUri("external"), Environment.DIRECTORY_DOWNLOADS, "text/plain")
+            )
+            for ((collectionUri, relPath, mime) in candidates) {
+                val saved = runCatching {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val uri = resolver.insert(collectionUri, values) ?: return@runCatching null
+                    val ok = runCatching {
+                        resolver.openOutputStream(uri, "w")?.use { out ->
+                            out.write(bytes)
+                            out.flush()
+                        } ?: error("Null output stream")
+                        resolver.update(
+                            uri,
+                            ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                            null,
+                            null
+                        )
+                        "$relPath/$fileName" to uri
+                    }
+                    if (ok.isFailure) {
+                        runCatching { resolver.delete(uri, null, null) }
+                        null
+                    } else {
+                        ok.getOrNull()
+                    }
+                }.getOrNull()
+                if (saved != null) return saved
             }
         }
 
-        // Fallback for API 24-28 (or if MediaStore insert returns null)
-        @Suppress("DEPRECATION")
-        val publicDocs = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-        val publicAryan = File(publicDocs, "Aryan")
-        val targetFile = runCatching {
-            if (!publicAryan.exists()) publicAryan.mkdirs()
-            val f = File(publicAryan, fileName)
-            f.writeBytes(bytes)
-            f
-        }.getOrElse {
-            val appDocs = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
-            val appAryan = File(appDocs, "Aryan")
-            if (!appAryan.exists()) appAryan.mkdirs()
-            File(appAryan, fileName).apply { writeBytes(bytes) }
+        val dirCandidates = buildList {
+            @Suppress("DEPRECATION")
+            add(File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "Aryan"))
+            @Suppress("DEPRECATION")
+            add(File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Aryan"))
+            context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)?.let { add(File(it, "Aryan")) }
+            add(File(context.filesDir, "Aryan"))
         }
-        return targetFile.absolutePath to Uri.fromFile(targetFile)
+        for (dir in dirCandidates) {
+            val written = runCatching {
+                if (!dir.exists()) dir.mkdirs()
+                val f = File(dir, fileName)
+                f.writeBytes(bytes)
+                f
+            }.getOrNull()
+            if (written != null && written.exists()) {
+                return written.absolutePath to Uri.fromFile(written)
+            }
+        }
+        val fallback = File(context.filesDir, fileName).apply { writeBytes(bytes) }
+        return fallback.absolutePath to Uri.fromFile(fallback)
     }
 }

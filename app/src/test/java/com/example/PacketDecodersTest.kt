@@ -238,8 +238,10 @@ class PacketDecodersTest {
         assertTrue(res.packageContent.contains("https://clientbp.ggpolarbear.com/GetLikedRecord"))
         assertTrue(res.packageContent.contains("Request Hex:\n1a725b2c56ec52ba7d09623454c0a003"))
         assertTrue(res.packageContent.contains("Response Hex:\n0a00"))
-        assertTrue(res.packageContent.contains("response_fields = {}"))
-        assertTrue(res.packageContent.contains("response_fields[1] = {}"))
+        assertTrue(res.packageContent.contains("def get_liked_record_response(K, V):"))
+        assertTrue(res.packageContent.contains("    fields = {}"))
+        assertTrue(res.packageContent.contains("    fields[1] = {}"))
+        assertTrue(res.packageContent.contains("    return iZ(str(gZ(fields).hex()), packet_id, K, V)"))
 
         val arr = org.json.JSONArray(res.jsonContent)
         assertEquals(1, arr.length())
@@ -458,5 +460,36 @@ class PacketDecodersTest {
         assertTrue(report.contains("https://client.ind.freefiremobile.com/GetLoginData\n\nRequest Hex:\n$loginHex\n\nResponse Hex:\n0801"))
         assertTrue(report.contains("\n\n\n\n\n\nhttps://client.ind.freefiremobile.com/UpdateSocialBasicInfo"))
         assertTrue(report.contains("Response Hex:\n<Empty>"))
+
+        // Bulk catalog repeated-message responses like [{1: 1001, ...}, {1: 1001, ...}] MUST be skipped
+        val bulkCatalogHex =
+            "0a0f081e100118a288a38703200528e7070a0f082810011888b9e0be01200528e707" +
+                "0a0f0832100118a288a38703200a28e7070a0f083c10011888b9e0be01200a28e707"
+        val catalogPkt = p1.copy(
+            id = 3,
+            url = "https://client.ind.freefiremobile.com/GetCatalog",
+            path = "/GetCatalog",
+            requestBodyHex = "9b886fb750efb187097dbbb281be7bae",
+            responseBodyHex = bulkCatalogHex
+        )
+        val (filteredReport, filteredArr) = com.example.decoder.BatchDecodeExporter.buildPremiumPackageReport(
+            session = null,
+            packets = listOf(p2, catalogPkt),
+            scope = com.example.decoder.FullDecodeScope.HTTP_HTTPS
+        )
+        assertEquals(1, filteredArr.length())
+        assertTrue(filteredReport.contains("UpdateSocialBasicInfo"))
+        assertTrue(!filteredReport.contains("GetCatalog"))
+        assertTrue(!filteredReport.contains("response_fields["))
+    }
+
+    @Test
+    fun `ca certificate save succeeds without throwing No such file or directory`() {
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val mgr = com.example.vpn.MitmCertificateManager(ctx)
+        val savedPath = mgr.saveCaCertToAryanFolder()
+        assertTrue(savedPath.contains("ARIYAN_A9X_CA.crt"))
+        assertTrue(mgr.isCaReady())
+        assertTrue(mgr.getCaPemString().contains("BEGIN CERTIFICATE"))
     }
 }

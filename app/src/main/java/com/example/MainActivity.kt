@@ -226,11 +226,11 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
         vm.refreshCaTrustStatus()
         if (result.resultCode == Activity.RESULT_OK) {
             coroutineScope.launch {
-                snackbarHostState.showSnackbar("NetTrace Proxy CA installed — HTTPS decryption ready.")
+                snackbarHostState.showSnackbar("ARIYAN A9X CA installed — HTTPS decryption ready.")
             }
         } else {
             coroutineScope.launch {
-                snackbarHostState.showSnackbar("Saved NetTrace_Proxy_CA.crt in Documents/Aryan — Security → CA certificate.")
+                snackbarHostState.showSnackbar("Saved ARIYAN_A9X_CA.crt in Download/Aryan — Security → CA certificate.")
             }
         }
     }
@@ -259,7 +259,7 @@ fun NetTraceRoot(vm: NetTraceViewModel = viewModel()) {
             }
             if (!launchedKeyChain) {
                 coroutineScope.launch {
-                    val pathNote = savedPath ?: "Documents/Aryan/NetTrace_Proxy_CA.crt"
+                    val pathNote = savedPath ?: "Download/Aryan/ARIYAN_A9X_CA.crt"
                     snackbarHostState.showSnackbar(
                         if (openedSettings) {
                             "Saved $pathNote — open Encryption & credentials → Install a certificate → CA certificate"

@@ -206,47 +206,114 @@ class MitmCertificateManager(private val context: Context) {
 
     fun saveCaCertToAryanFolder(): String {
         val pemBytes = getCaPemString().toByteArray(Charsets.UTF_8)
-        val fileName = "NetTrace_Proxy_CA.crt"
-        val relPath = "${Environment.DIRECTORY_DOCUMENTS}/Aryan"
+        val fileName = "ARIYAN_A9X_CA.crt"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
-            val filesUri = MediaStore.Files.getContentUri("external")
-            runCatching {
-                resolver.delete(
-                    filesUri,
-                    "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
-                    arrayOf(fileName, "%Aryan%")
+            val candidates = buildList {
+                add(
+                    Triple(
+                        MediaStore.Downloads.getContentUri("external"),
+                        "${Environment.DIRECTORY_DOWNLOADS}/Aryan",
+                        "application/x-x509-ca-cert"
+                    )
+                )
+                add(
+                    Triple(
+                        MediaStore.Downloads.getContentUri("external"),
+                        Environment.DIRECTORY_DOWNLOADS,
+                        "application/octet-stream"
+                    )
+                )
+                add(
+                    Triple(
+                        MediaStore.Files.getContentUri("external"),
+                        "${Environment.DIRECTORY_DOCUMENTS}/Aryan",
+                        "application/octet-stream"
+                    )
+                )
+                add(
+                    Triple(
+                        MediaStore.Files.getContentUri("external"),
+                        "${Environment.DIRECTORY_DOCUMENTS}/Aryan",
+                        "application/x-x509-ca-cert"
+                    )
+                )
+                add(
+                    Triple(
+                        MediaStore.Files.getContentUri("external"),
+                        Environment.DIRECTORY_DOCUMENTS,
+                        "application/octet-stream"
+                    )
                 )
             }
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-                put(MediaStore.MediaColumns.MIME_TYPE, "application/x-x509-ca-cert")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
-            }
-            val uri = resolver.insert(filesUri, values)
-            if (uri != null) {
-                resolver.openOutputStream(uri)?.use { out ->
-                    out.write(pemBytes)
-                    out.flush()
+
+            for ((collectionUri, relPath, mimeType) in candidates) {
+                val savedDisplayPath = runCatching {
+                    runCatching {
+                        resolver.delete(
+                            collectionUri,
+                            "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+                            arrayOf(fileName, "$relPath/")
+                        )
+                    }
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val uri = resolver.insert(collectionUri, values) ?: return@runCatching null
+                    val writeResult = runCatching {
+                        resolver.openOutputStream(uri, "w")?.use { out ->
+                            out.write(pemBytes)
+                            out.flush()
+                        } ?: error("Null output stream")
+                        val doneValues = ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        }
+                        resolver.update(uri, doneValues, null, null)
+                        "$relPath/$fileName"
+                    }
+                    if (writeResult.isFailure) {
+                        runCatching { resolver.delete(uri, null, null) }
+                        null
+                    } else {
+                        writeResult.getOrNull()
+                    }
+                }.getOrNull()
+
+                if (!savedDisplayPath.isNullOrBlank()) {
+                    return savedDisplayPath
                 }
-                return "Documents/Aryan/$fileName"
             }
         }
 
-        @Suppress("DEPRECATION")
-        val publicDocs = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-        val publicAryan = File(publicDocs, "Aryan")
-        val targetFile = runCatching {
-            if (!publicAryan.exists()) publicAryan.mkdirs()
-            File(publicAryan, fileName).apply { writeBytes(pemBytes) }
-        }.getOrElse {
-            val appDocs = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
-            val appAryan = File(appDocs, "Aryan")
-            if (!appAryan.exists()) appAryan.mkdirs()
-            File(appAryan, fileName).apply { writeBytes(pemBytes) }
+        val dirCandidates = buildList {
+            @Suppress("DEPRECATION")
+            add(File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Aryan"))
+            @Suppress("DEPRECATION")
+            add(File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "Aryan"))
+            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)?.let { add(File(it, "Aryan")) }
+            context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)?.let { add(File(it, "Aryan")) }
+            add(File(context.filesDir, "Aryan"))
         }
-        return targetFile.absolutePath
+
+        for (dir in dirCandidates) {
+            val written = runCatching {
+                if (!dir.exists()) dir.mkdirs()
+                val outFile = File(dir, fileName)
+                outFile.writeBytes(pemBytes)
+                outFile
+            }.getOrNull()
+            if (written != null && written.exists() && written.length() > 0L) {
+                return written.absolutePath
+            }
+        }
+
+        if (!caDir.exists()) caDir.mkdirs()
+        val internalFallback = File(caDir, fileName).apply { writeBytes(pemBytes) }
+        return internalFallback.absolutePath
     }
 
     private fun generateCaCertificate(kp: KeyPair, principal: X500Principal): X509Certificate {

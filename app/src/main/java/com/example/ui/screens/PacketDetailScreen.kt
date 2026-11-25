@@ -67,6 +67,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.R
 import com.example.data.db.CapturedPacketEntity
+import com.example.decoder.BatchDecodeExporter
 import com.example.decoder.DecryptMode
 import com.example.decoder.HexUtils
 import com.example.decoder.JwtDecodeResult
@@ -92,6 +93,7 @@ import com.example.ui.theme.VioletProto
 
 private data class PacketDetailComputed(
     val packetJson: String,
+    val fullPackageText: String,
     val reqDecodedText: String?,
     val respDecodedText: String?,
     val reqHeaders: Map<String, String>,
@@ -125,6 +127,7 @@ fun PacketDetailScreen(
         value = withContext(Dispatchers.Default) {
             PacketDetailComputed(
                 packetJson = PacketJsonSerializer.packetToFormattedJson(packet),
+                fullPackageText = BatchDecodeExporter.formatSinglePackageEntry(packet),
                 reqDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.requestBodyHex),
                 respDecodedText = PacketJsonSerializer.decodePayloadFormattedText(packet.responseBodyHex),
                 reqHeaders = PacketJsonSerializer.parseHeadersMap(packet.requestHeadersJson),
@@ -213,9 +216,11 @@ fun PacketDetailScreen(
                 when (selectedTab) {
                     0 -> DecodeTabContent(
                         packet = packet,
+                        fullPackageText = ready.fullPackageText,
                         jwtDecoded = ready.jwtDecoded,
                         reqAnalysis = ready.reqAnalysis,
                         respAnalysis = ready.respAnalysis,
+                        onSharePackage = { onShareJson(ready.fullPackageText) },
                         onCopyToast = onCopyToast,
                         onSendToDecoderLab = onSendToDecoderLab
                     )
@@ -342,19 +347,21 @@ fun PacketDetailScreen(
 @Composable
 private fun DecodeTabContent(
     packet: CapturedPacketEntity,
+    fullPackageText: String,
     jwtDecoded: JwtDecodeResult?,
     reqAnalysis: PayloadAnalysis,
     respAnalysis: PayloadAnalysis,
+    onSharePackage: () -> Unit,
     onCopyToast: (String) -> Unit,
     onSendToDecoderLab: (String) -> Unit
 ) {
+    val clipboard = LocalClipboardManager.current
     val reqDecodable = reqAnalysis.classification == PayloadClassification.PROTOBUF ||
         reqAnalysis.classification == PayloadClassification.JSON
     val respDecodable = respAnalysis.classification == PayloadClassification.PROTOBUF ||
         respAnalysis.classification == PayloadClassification.JSON
-    var showResponse by remember(packet.id) {
-        mutableStateOf(!reqDecodable && respDecodable)
-    }
+    // 0 = Both (Request + Response together), 1 = Request only, 2 = Response only
+    var viewScope by remember(packet.id) { mutableIntStateOf(0) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         SingleChoiceSegmentedButtonRow(
@@ -364,23 +371,30 @@ private fun DecodeTabContent(
                 .testTag("decode_request_response_switch")
         ) {
             SegmentedButton(
-                selected = !showResponse,
-                onClick = { showResponse = false },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                selected = viewScope == 0,
+                onClick = { viewScope = 0 },
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3)
+            ) {
+                Text("BOTH (REQ+RESP)", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            SegmentedButton(
+                selected = viewScope == 1,
+                onClick = { viewScope = 1 },
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3)
             ) {
                 Text(
-                    text = if (reqDecodable) "REQUEST (${reqAnalysis.classification.name})" else "REQUEST (${reqAnalysis.byteCount}B)",
+                    text = if (reqDecodable) "REQ (${reqAnalysis.classification.name})" else "REQ (${reqAnalysis.byteCount}B)",
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
             SegmentedButton(
-                selected = showResponse,
-                onClick = { showResponse = true },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                selected = viewScope == 2,
+                onClick = { viewScope = 2 },
+                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3)
             ) {
                 Text(
-                    text = if (respDecodable) "RESPONSE (${respAnalysis.classification.name})" else "RESPONSE (${respAnalysis.byteCount}B)",
+                    text = if (respDecodable) "RESP (${respAnalysis.classification.name})" else "RESP (${respAnalysis.byteCount}B)",
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -394,15 +408,55 @@ private fun DecodeTabContent(
                 .weight(1f)
                 .fillMaxWidth()
         ) {
-            if (!showResponse) {
-                if (jwtDecoded != null) {
-                    item {
-                        JwtDecodedCard(jwt = jwtDecoded, onCopyToast = onCopyToast)
+            item {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Button(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(fullPackageText))
+                            onCopyToast("Full URL + Hex + Both Packages copied")
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("decode_copy_full_package_button")
+                    ) {
+                        Icon(AppIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Copy Full Package", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    OutlinedButton(
+                        onClick = onSharePackage,
+                        modifier = Modifier.testTag("decode_share_full_package_button")
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Share")
                     }
                 }
+            }
+
+            if (viewScope != 2 && jwtDecoded != null) {
+                item {
+                    JwtDecodedCard(jwt = jwtDecoded, onCopyToast = onCopyToast)
+                }
+            }
+
+            item {
+                DualBodyHexOverviewCard(
+                    requestHex = packet.requestBodyHex,
+                    responseHex = packet.responseBodyHex,
+                    showRequest = viewScope != 2,
+                    showResponse = viewScope != 1,
+                    onCopyToast = onCopyToast
+                )
+            }
+
+            if (viewScope == 0 || viewScope == 1) {
                 item {
                     PayloadDecodedSection(
-                        title = "Request Decoded View",
+                        title = "Request Decoded Package",
                         endpointPath = packet.path,
                         isResponse = false,
                         analysis = reqAnalysis,
@@ -411,10 +465,12 @@ private fun DecodeTabContent(
                         onSendToDecoderLab = onSendToDecoderLab
                     )
                 }
-            } else {
+            }
+
+            if (viewScope == 0 || viewScope == 2) {
                 item {
                     PayloadDecodedSection(
-                        title = "Response Decoded View",
+                        title = "Response Decoded Package",
                         endpointPath = packet.path,
                         isResponse = true,
                         analysis = respAnalysis,
@@ -423,6 +479,121 @@ private fun DecodeTabContent(
                         onSendToDecoderLab = onSendToDecoderLab
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DualBodyHexOverviewCard(
+    requestHex: String,
+    responseHex: String,
+    showRequest: Boolean,
+    showResponse: Boolean,
+    onCopyToast: (String) -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    var expanded by remember(requestHex, responseHex) { mutableStateOf(true) }
+    val cleanReq = remember(requestHex) { HexUtils.sanitizeHex(requestHex) }
+    val cleanResp = remember(responseHex) { HexUtils.sanitizeHex(responseHex) }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.32f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+            ) {
+                Text(
+                    text = "Body Hex (Request & Response)",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    imageVector = if (expanded) AppIcons.ExpandLess else AppIcons.ExpandMore,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(top = 8.dp)
+                ) {
+                    if (showRequest) {
+                        CompactHexStrip(
+                            label = "Request Hex (${cleanReq.length / 2}B)",
+                            hex = cleanReq,
+                            onCopy = {
+                                clipboard.setText(AnnotatedString(cleanReq))
+                                onCopyToast("Request Hex copied")
+                            }
+                        )
+                    }
+                    if (showResponse) {
+                        CompactHexStrip(
+                            label = "Response Hex (${cleanResp.length / 2}B)",
+                            hex = cleanResp,
+                            onCopy = {
+                                clipboard.setText(AnnotatedString(cleanResp))
+                                onCopyToast("Response Hex copied")
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactHexStrip(
+    label: String,
+    hex: String,
+    onCopy: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                if (hex.isNotBlank()) {
+                    IconButton(onClick = onCopy, modifier = Modifier.size(30.dp)) {
+                        Icon(
+                            AppIcons.ContentCopy,
+                            contentDescription = stringResource(R.string.cd_copy),
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
+            }
+            SelectionContainer {
+                Text(
+                    text = if (hex.isBlank()) "<Empty>" else if (hex.length > 1200) "${hex.take(1200)}..." else hex,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
             }
         }
     }
@@ -1058,22 +1229,41 @@ private fun HeadersAndHexTabContent(
     onCopyToast: (String) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
-    var showResponse by remember(packet.id) { mutableStateOf(false) }
+    // 0 = BOTH, 1 = REQUEST, 2 = RESPONSE
+    var scopeMode by remember(packet.id) { mutableIntStateOf(0) }
     var showHeadersOnly by remember(packet.id) { mutableStateOf(false) }
     var spacedHex by remember(packet.id) { mutableStateOf(true) }
 
-    val activeHex = if (showResponse) packet.responseBodyHex else packet.requestBodyHex
-    val activeAnalysis = if (showResponse) respAnalysis else reqAnalysis
-    val activeHeaders = if (showResponse) respHeaders else reqHeaders
-    val formattedBody by produceState(
-        initialValue = if (activeHex.isBlank()) "<Empty Body>" else "",
-        key1 = activeHex,
+    val formattedReqBody by produceState(
+        initialValue = if (packet.requestBodyHex.isBlank()) "<Empty Body>" else "",
+        key1 = packet.requestBodyHex,
         key2 = spacedHex
     ) {
         value = withContext(Dispatchers.Default) {
-            if (spacedHex) HexUtils.formatSpacedHex(activeHex)
-            else HexUtils.sanitizeHex(activeHex).uppercase().ifBlank { "<Empty Body>" }
+            if (spacedHex) HexUtils.formatSpacedHex(packet.requestBodyHex)
+            else HexUtils.sanitizeHex(packet.requestBodyHex).uppercase().ifBlank { "<Empty Body>" }
         }
+    }
+    val formattedRespBody by produceState(
+        initialValue = if (packet.responseBodyHex.isBlank()) "<Empty Body>" else "",
+        key1 = packet.responseBodyHex,
+        key2 = spacedHex
+    ) {
+        value = withContext(Dispatchers.Default) {
+            if (spacedHex) HexUtils.formatSpacedHex(packet.responseBodyHex)
+            else HexUtils.sanitizeHex(packet.responseBodyHex).uppercase().ifBlank { "<Empty Body>" }
+        }
+    }
+
+    val totalBodyBytes = when (scopeMode) {
+        1 -> reqAnalysis.byteCount
+        2 -> respAnalysis.byteCount
+        else -> reqAnalysis.byteCount + respAnalysis.byteCount
+    }
+    val totalHeadersCount = when (scopeMode) {
+        1 -> reqHeaders.size
+        2 -> respHeaders.size
+        else -> reqHeaders.size + respHeaders.size
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -1091,25 +1281,34 @@ private fun HeadersAndHexTabContent(
                         onClick = { showHeadersOnly = false },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
                     ) {
-                        Text("BODY (${activeAnalysis.byteCount}B)")
+                        Text("BODY (${totalBodyBytes}B)")
                     }
                     SegmentedButton(
                         selected = showHeadersOnly,
                         onClick = { showHeadersOnly = true },
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
                     ) {
-                        Text("HEADERS (${activeHeaders.size})")
+                        Text("HEADERS ($totalHeadersCount)")
                     }
                 }
             }
 
             if (showHeadersOnly) {
-                item {
-                    HeadersCard(
-                        title = if (showResponse) "Response Headers (${respHeaders.size})"
-                        else "Request Headers (${reqHeaders.size})",
-                        headers = activeHeaders
-                    )
+                if (scopeMode == 0 || scopeMode == 1) {
+                    item {
+                        HeadersCard(
+                            title = "Request Headers (${reqHeaders.size})",
+                            headers = reqHeaders
+                        )
+                    }
+                }
+                if (scopeMode == 0 || scopeMode == 2) {
+                    item {
+                        HeadersCard(
+                            title = "Response Headers (${respHeaders.size})",
+                            headers = respHeaders
+                        )
+                    }
                 }
             } else {
                 item {
@@ -1130,17 +1329,31 @@ private fun HeadersAndHexTabContent(
                         )
                     }
                 }
-                item {
-                    HexBlockCard(
-                        title = if (showResponse) "Response Body (${respAnalysis.byteCount}B)"
-                        else "Request Body (${reqAnalysis.byteCount}B)",
-                        displayHex = formattedBody,
-                        hasBytes = activeHex.isNotBlank(),
-                        onCopyHex = {
-                            clipboard.setText(AnnotatedString(formattedBody))
-                            onCopyToast(if (showResponse) "Response hex copied" else "Request hex copied")
-                        }
-                    )
+                if (scopeMode == 0 || scopeMode == 1) {
+                    item {
+                        HexBlockCard(
+                            title = "Request Body (${reqAnalysis.byteCount}B)",
+                            displayHex = formattedReqBody,
+                            hasBytes = packet.requestBodyHex.isNotBlank(),
+                            onCopyHex = {
+                                clipboard.setText(AnnotatedString(formattedReqBody))
+                                onCopyToast("Request hex copied")
+                            }
+                        )
+                    }
+                }
+                if (scopeMode == 0 || scopeMode == 2) {
+                    item {
+                        HexBlockCard(
+                            title = "Response Body (${respAnalysis.byteCount}B)",
+                            displayHex = formattedRespBody,
+                            hasBytes = packet.responseBodyHex.isNotBlank(),
+                            onCopyHex = {
+                                clipboard.setText(AnnotatedString(formattedRespBody))
+                                onCopyToast("Response hex copied")
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1154,16 +1367,23 @@ private fun HeadersAndHexTabContent(
                 .testTag("detail_request_response_switch")
         ) {
             SegmentedButton(
-                selected = !showResponse,
-                onClick = { showResponse = false },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                selected = scopeMode == 0,
+                onClick = { scopeMode = 0 },
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3)
+            ) {
+                Text("BOTH")
+            }
+            SegmentedButton(
+                selected = scopeMode == 1,
+                onClick = { scopeMode = 1 },
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3)
             ) {
                 Text("REQUEST")
             }
             SegmentedButton(
-                selected = showResponse,
-                onClick = { showResponse = true },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                selected = scopeMode == 2,
+                onClick = { scopeMode = 2 },
+                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3)
             ) {
                 Text("RESPONSE")
             }
